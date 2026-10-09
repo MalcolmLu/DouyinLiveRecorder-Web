@@ -39,7 +39,7 @@
         <button class="nav-item" id="desktop-nav" data-page="desktop" hidden><span class="nav-number">05</span>桌面设置</button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small id="engine-description">Intel QSV · 单任务队列</small></div></div>
+        <div class="engine-note"><span class="dot"></span><div><span id="engine-title">H.265 硬件转码</span><small id="engine-description">Intel QSV · 单任务队列</small></div></div>
         <button id="logout" class="text-button">退出登录</button>
         <span class="version">DouyinLiveRecorder-Web 1.0.0 · Core v4.0.7</span>
       </div>
@@ -106,7 +106,7 @@
             <div class="settings-section"><div><h2>录制完成后的文件</h2><p class="muted">录制结束后自动处理，无需手动操作。</p></div><div class="form-grid">
               <label>录制完成后保存格式<select name="post_format"><option value="mp4">MP4</option><option value="keep">保留录制格式，不自动转换</option></select></label>
               <label class="switch-row"><span>重新编码为 H.265<small>使用当前编码器；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
-              <label>H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span id="quality-unit">ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
+              <label id="h265-quality-setting">H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span id="quality-unit">ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
               <label class="switch-row"><span>转换成功后删除原文件<small>验证通过才删除；关闭时保留原件。MP4 原件保留时，输出另存为 .H265.mp4。</small></span><input type="checkbox" name="delete_original" role="switch"></label>
             </div></div>
             <p class="field-error" id="settings-error" role="alert"></p>
@@ -128,7 +128,7 @@
             <div class="settings-section"><div><h2>H.265 编码</h2><p class="muted">自动检测会优先测试本机硬件编码器。指定编码器失败时保留源录像，不会改用其他编码器。</p></div><div class="form-grid">
               <label>编码器<select name="encoder"><option value="auto">自动检测硬件，必要时使用 CPU</option></select></label>
               <button id="test-encoder" type="button" class="secondary">测试当前编码器</button>
-              <label>VideoToolbox 视频码率<div class="unit-input"><input name="bitrate_kbps" type="number" min="500" max="100000" required><span>kbps</span></div><small class="muted">仅用于 Apple VideoToolbox；默认 4000 kbps，数值越大通常质量越高。</small></label>
+              <label id="videotoolbox-bitrate">VideoToolbox 视频码率<div class="unit-input"><input name="bitrate_kbps" type="number" min="500" max="100000" required><span>kbps</span></div><small class="muted">仅用于 Apple VideoToolbox；默认 4000 kbps，数值越大通常质量越高。</small></label>
               <label>CPU 转码线程数<input name="cpu_threads" type="number" min="1" max="16" required><small class="muted">仅影响 CPU 编码资源上限。其他编码器的质量在“录制设置”中调整。</small></label>
             </div></div>
             <div class="settings-section"><div><h2>窗口与后台运行</h2></div><div class="form-grid">

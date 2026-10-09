@@ -73,6 +73,7 @@ function renderRooms() {
   const data=ctx.snapshot; if(!data) return;
   const labels={hevc_qsv:"Intel QSV",hevc_videotoolbox:"Apple VideoToolbox",hevc_nvenc:"NVIDIA NVENC",hevc_amf:"AMD AMF",libx265:"CPU"};
   const encoder=labels[data.encoding?.encoder] || "H.265";
+  setText("#engine-title",data.encoding?.encoder==="libx265"?"H.265 软件转码":"H.265 硬件转码");
   setText("#engine-description",encoder+" · 单任务队列");setText("#active-encoder-label","H.265 · "+encoder);
   renderDesktopStatus(data.desktop);
   setText("#metric-rooms",data.monitoring_count);
@@ -220,6 +221,7 @@ async function loadSettings() {
   }
   $("#settings-pending").hidden=!data.pending;
   setText("#settings-state",data.pending ? "有设置等待应用" : "配置已读取");
+  $("#h265-quality-setting").hidden=data.encoder==="hevc_videotoolbox";
   setText("#quality-unit",data.encoder==="libx265"?"CRF":data.encoder==="hevc_qsv"?"ICQ":"质量");
   updateSettingsDependencies();setText("#settings-error","");
 }
@@ -307,6 +309,7 @@ async function loadDesktop(){
   }
   setText("#desktop-tools",(data.ffmpeg_path || "未找到 FFmpeg")+" · Node.js "+(data.status.node_ready?"已就绪":"未找到"));
   setText("#desktop-data-dir","应用数据目录："+data.data_dir);
+  $("#videotoolbox-bitrate").hidden=data.platform!=="darwin";
   renderDesktopStatus(data.status);setText("#desktop-error","");
 }
 $("#desktop-form").addEventListener("submit",event=>{

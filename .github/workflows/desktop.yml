@@ -51,6 +51,8 @@ jobs:
           PYTHONPATH: gui
       - run: npm ci --no-audit --no-fund
         working-directory: desktop
+      - run: node --test test_renderer.cjs
+        working-directory: desktop
       - run: npm run prepare-tools
         working-directory: desktop
       - run: python desktop/build_backend.py

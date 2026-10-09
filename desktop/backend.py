@@ -12,6 +12,9 @@ import time
 
 ROOT=Path(getattr(sys,"_MEIPASS",Path(__file__).resolve().parent.parent))
 sys.path[:0]=[str(ROOT),str(ROOT/"gui"),str(ROOT/"desktop"),str(ROOT/"scripts")]
+for stream in (sys.stdin,sys.stdout,sys.stderr):
+    if hasattr(stream,"reconfigure"):
+        stream.reconfigure(encoding="utf-8",errors="replace")
 
 
 def main():

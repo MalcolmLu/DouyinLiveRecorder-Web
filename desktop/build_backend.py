@@ -5,7 +5,7 @@ import sys
 
 ROOT=Path(__file__).resolve().parent.parent
 desktop=ROOT/"desktop"
-command=[sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onedir",
+command=[sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onedir","--python-option","X utf8",
          "--name","dlr-backend","--distpath",str(desktop/"backend-dist"),
          "--workpath",str(desktop/"build"),"--specpath",str(desktop/"build"),
          "--paths",str(ROOT),"--paths",str(ROOT/"gui"),"--paths",str(desktop),
