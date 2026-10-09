@@ -25,8 +25,8 @@ macOS 自动检测 Apple VideoToolbox；Windows 自动测试 Intel QSV、NVIDIA 
 
 ## 数据
 
-Windows：Electron 的用户数据目录（通常为 %APPDATA%/DouyinLiveRecorder）。
-macOS：~/Library/Application Support/DouyinLiveRecorder。
+Windows：Electron 的用户数据目录（通常为 %APPDATA%/douyin-live-recorder-desktop）。
+macOS：~/Library/Application Support/douyin-live-recorder-desktop。
 
 实际目录会显示在“桌面设置”。其中 config 保存录制设置、代理、Cookie、队列和状态；logs 保存后台日志；录像默认存放于 recordings，可改为其他绝对路径。
 
