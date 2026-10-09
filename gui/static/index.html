@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>录播控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <section class="login-shell" id="login-view" hidden>
+    <div class="login-brand"><span class="brand-mark">R</span><span>录播控制台</span></div>
+    <div class="login-panel">
+      <span class="eyebrow">PRIVATE RECORDING CONSOLE</span>
+      <h1>让每一次直播，<br>都有迹可循。</h1>
+      <p class="muted">登录后管理直播录制、自动转码与代理。</p>
+      <form id="login-form">
+        <label for="login-password">网页管理密码</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="512">
+        <p class="field-error" id="login-error" role="alert"></p>
+        <button class="primary full" type="submit">登录控制台</button>
+      </form>
+      <div id="setup-notice" class="notice" hidden>尚未设置网页管理密码。请在 NAS 的网页管理容器控制台运行 <code>python /opt/recorder-web/manage.py set-password</code>，自行输入两次密码后刷新页面。</div>
+      <p class="login-foot">视频与配置保存在你的 NAS 中。</p>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-view" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#live"><span class="brand-mark">R</span><span>录播控制台<small>LIVE RECORDER</small></span></a>
+      <span class="nav-caption">工作空间</span>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-page="live"><span class="nav-number">01</span>直播任务<span id="nav-rooms" class="nav-count">—</span></button>
+        <button class="nav-item" data-page="jobs"><span class="nav-number">02</span>转码队列<span id="nav-jobs" class="nav-count">—</span></button>
+        <button class="nav-item" data-page="settings"><span class="nav-number">03</span>录制设置</button>
+        <button class="nav-item" data-page="proxy"><span class="nav-number">04</span>代理设置</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small>Intel QSV · 单任务队列</small></div></div>
+        <button id="logout" class="text-button">退出登录</button>
+        <span class="version">DouyinLiveRecorder v4.0.7</span>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div class="breadcrumb">我的 NAS <span>/</span> 录制管理</div>
+        <div class="connection" id="connection"><span class="dot"></span><span>正在连接</span></div>
+      </header>
+      <div id="environment-banner" class="banner" hidden>本机验证环境 · 尚未连接 NAS，这里的操作不会修改 NAS。</div>
+      <div id="global-error" class="banner error-banner" role="alert" hidden></div>
+      <div class="page-body">
+        <section id="page-live" class="page">
+          <div class="page-heading"><div><span class="eyebrow">LIVE MONITOR</span><h1>直播任务</h1><p class="muted">关注直播开始，自动录制每一段。</p></div><button id="add-room" class="primary">新增直播间</button></div>
+          <div class="metrics" aria-label="实时统计">
+            <div><span>监控直播间</span><strong id="metric-rooms">—</strong><small>启用中的录制任务</small></div>
+            <div><span>正在录制</span><strong id="metric-recording">—</strong><small>以采集器实时状态为准</small></div>
+            <div><span>待转码</span><strong id="metric-queue">—</strong><small id="metric-queue-note">按顺序自动处理</small></div>
+            <div><span>已节省空间</span><strong id="metric-saved">—</strong><small>已完成任务的实际差值</small></div>
+          </div>
+          <div class="section-heading"><h2>已添加的直播间</h2><span class="muted" id="last-update">正在同步</span></div>
+          <div id="room-loading" class="skeleton-list" aria-label="加载直播任务"><div></div><div></div><div></div></div>
+          <div id="room-empty" class="empty-state" hidden><span class="empty-symbol">R</span><h3>添加你的第一个直播间</h3><p>粘贴直播间链接，选择画质与连接方式。开播后会自动录制。</p><button class="primary" id="add-first-room">新增直播间</button></div>
+          <div class="table-wrap" id="room-table-wrap" hidden>
+            <table><thead><tr><th>直播间</th><th>状态</th><th>连接方式</th><th>录制画质</th><th>本次录制</th><th class="align-right">操作</th></tr></thead><tbody id="room-table"></tbody></table>
+          </div>
+          <div class="workflow-note"><span class="workflow-tag">自动流程</span><p>直播录制结束 → 分段进入队列 → 核显转码 → 验证文件 → 按设置保留或删除原文件。<br><span class="muted">每小时切出的分段先保存为录制格式，整次直播录制结束后统一入队。</span></p></div>
+        </section>
+
+        <section id="page-jobs" class="page" hidden>
+          <div class="page-heading"><div><span class="eyebrow">ENCODING WORKSPACE</span><h1>转码队列</h1><p class="muted">从录制文件到最终视频，每一步都看得见。</p></div><button id="refresh-jobs" class="secondary">刷新队列</button></div>
+          <div id="active-encoding" class="active-encoding" hidden>
+            <div><span class="eyebrow">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
+            <div class="progress-area"><div class="progress-label"><span>H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
+          </div>
+          <div class="queue-summary" id="queue-summary"></div>
+          <div class="toolbar">
+            <label class="sr-only" for="job-filter">任务状态</label>
+            <select id="job-filter"><option value="all">全部任务</option><option value="running">处理中</option><option value="queued">排队中</option><option value="failed">失败</option><option value="done">已完成</option></select>
+            <label class="sr-only" for="job-search">搜索文件名</label>
+            <input id="job-search" type="search" placeholder="搜索文件名" maxlength="100">
+            <span class="muted" id="jobs-total">—</span>
+          </div>
+          <div id="jobs-empty" class="empty-state" hidden><h3>这里还没有任务</h3><p>录制完成的视频会自动进入队列，也可以调整上方的筛选条件。</p></div>
+          <div class="table-wrap" id="job-table-wrap">
+            <table><thead><tr><th>录像文件</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
+          </div>
+          <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
+          <p class="muted footnote">删除记录会保留原录像和转码后的视频；排队中或处理中的任务结束后才能删除。失败任务可查看原因并重试，文件已变化或同名输出已存在时会阻止覆盖。</p>
+        </section>
+
+        <section id="page-settings" class="page" hidden>
+          <div class="page-heading"><div><span class="eyebrow">RECORDING PREFERENCES</span><h1>录制设置</h1><p class="muted">设置分段时长与最终保存方式。</p></div><span class="pill" id="settings-state">读取配置中</span></div>
+          <div id="settings-pending" class="notice" hidden>有录制参数等待应用。当前录像全部结束后，采集器会自动启用新设置。</div>
+          <form id="settings-form">
+            <div class="settings-section"><div><h2>采集与分段</h2><p class="muted">录制参数会在当前录像全部结束后生效。</p></div><div class="form-grid">
+              <label>默认录制画质<select name="quality"><option>原画</option><option>蓝光</option><option>超清</option><option>高清</option><option>标清</option><option>流畅</option></select></label>
+              <label>检测直播间间隔<div class="unit-input"><input type="number" name="poll_seconds" min="30" max="3600" required><span>秒</span></div></label>
+              <label>录制文件格式<select name="record_format"><option value="TS">TS · 适合持续直播录制</option><option value="MKV">MKV</option><option value="MP4">MP4</option></select></label>
+              <label class="switch-row"><span>开启分 P / 分段录制<small>按时长生成文件，直播继续录制。</small></span><input type="checkbox" name="segment_enabled" role="switch"></label>
+              <label>每段录制时长<div class="unit-input"><input type="number" name="segment_seconds" min="60" max="86400" required><span>秒</span></div><small class="muted">3600 秒 = 1 小时；关闭分段后该值不生效。</small></label>
+            </div></div>
+            <div class="settings-section"><div><h2>录制完成后的文件</h2><p class="muted">录制结束后自动处理，无需手动操作。</p></div><div class="form-grid">
+              <label>录制完成后保存格式<select name="post_format"><option value="mp4">MP4</option><option value="keep">保留录制格式，不自动转换</option></select></label>
+              <label class="switch-row"><span>重新编码为 H.265<small>使用 Intel QSV 核显；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
+              <label>H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span>ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
+              <label class="switch-row"><span>转换成功后删除原文件<small>验证通过才删除；关闭时保留原件。MP4 原件保留时，输出另存为 .H265.mp4。</small></span><input type="checkbox" name="delete_original" role="switch"></label>
+            </div></div>
+            <p class="field-error" id="settings-error" role="alert"></p>
+            <div class="form-footer"><span class="muted">已是 H.265 的视频会保留原编码，避免重复有损处理。</span><button class="primary" type="submit">保存录制设置</button></div>
+          </form>
+        </section>
+
+        <section id="page-proxy" class="page" hidden>
+          <div class="page-heading"><div><span class="eyebrow">NETWORK ROUTING</span><h1>代理设置</h1><p class="muted">为需要的直播间选择代理，其余使用直连。</p></div><span class="pill" id="proxy-state">读取配置中</span></div>
+          <div class="settings-section"><div><h2>共享代理服务器</h2><p class="muted">直播间勾选“使用代理”后，会采用这里的地址。现有 OpenClash 代理可直接使用。</p></div>
+            <form id="proxy-form" class="form-grid">
+              <label class="span-two">代理地址<input name="server" type="url" required placeholder="http://192.0.2.2:7893" autocomplete="off"><small class="muted">支持 HTTP / HTTPS 代理。地址中不要包含账号与密码。</small></label>
+              <label>代理用户名<input name="username" type="text" autocomplete="off" maxlength="512"><small class="muted" id="stored-username">留空保留已有用户名。</small></label>
+              <label>代理密码<input name="password" type="password" autocomplete="new-password" maxlength="512"><small class="muted" id="stored-password">留空保留已有密码，密码不会回显。</small></label>
+              <label class="check-row span-two"><input name="clear_auth" type="checkbox"><span>清除已保存的代理账号与密码</span></label>
+              <p class="field-error span-two" id="proxy-error" role="alert"></p>
+              <div class="form-footer span-two"><span class="muted">修改后，下次检测直播间时生效；正在进行的录制保持当前连接。</span><button class="primary" type="submit">保存代理设置</button></div>
+            </form>
+          </div>
+          <div class="notice">每个直播间的连接方式可以单独设置。在“直播任务”中点击“编辑”，勾选或取消“使用共享代理”。</div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="room-dialog">
+    <form id="room-form">
+      <div class="dialog-heading"><div><span class="eyebrow">LIVE SOURCE</span><h2 id="room-dialog-title">新增直播间</h2></div><button type="button" class="text-button" id="close-room">关闭</button></div>
+      <label>直播间链接<input name="url" type="url" required maxlength="2048" placeholder="https://live.bilibili.com/直播间号"><small class="muted" id="room-url-hint">支持录制器已有的直播平台；YouTube 频道链接会自动规范为 /live。</small></label>
+      <label>备注名称<input name="name" maxlength="80" placeholder="选填，便于识别直播间" autocomplete="off"></label>
+      <label>录制画质<select name="quality"><option>原画</option><option>蓝光</option><option>超清</option><option>高清</option><option>标清</option><option>流畅</option></select></label>
+      <label class="switch-row"><span>使用共享代理<small id="room-proxy-hint">代理地址在“代理设置”中管理。</small></span><input name="use_proxy" type="checkbox" role="switch"></label>
+      <p class="field-error" id="room-error" role="alert"></p>
+      <div class="dialog-footer"><button type="button" id="cancel-room" class="secondary">取消</button><button type="submit" class="primary" id="save-room">添加并开始监控</button></div>
+    </form>
+  </dialog>
+  <dialog id="error-dialog"><div class="dialog-heading"><h2>任务失败原因</h2><button id="close-error" class="text-button">关闭</button></div><p class="muted">原录像已保留。</p><pre id="error-detail"></pre></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

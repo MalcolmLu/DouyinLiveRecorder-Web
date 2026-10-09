@@ -1,0 +1,38 @@
+name: 🚀 Feature request
+description: 提出你对项目的新想法或建议。
+title: 🚀[Feature] 请输入标题
+labels: enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        📝 **请在上方的`title`中填写一个简洁明了的标题**，格式建议为：🚀[Feature] 简短描述。
+        例如：🚀[Feature] 添加xx直播录制。
+  - type: checkboxes
+    attributes:
+      label: ⚠️ 搜索是否存在类似issue
+      description: >
+        🔍 [点击这里搜索历史issue](https://github.com/MalcolmLu/DouyinLiveRecorder-Web/issues?q=is%3Aissue) 使用关键词搜索，确保没有重复的issue。
+      options:
+        - label: 我已经搜索过issues，没有发现相似issue
+          required: true
+  - type: textarea
+    attributes:
+      label: 📜 功能描述
+      description: 请详细描述你希望添加的功能，包括它的工作方式和预期效果。
+      placeholder: |
+        功能描述：
+  - type: textarea
+    attributes:
+      label: 🌐 举例(可选)
+      description: 如果可能，请提供功能相关的示例、截图或相关网址。
+      placeholder: |
+        直播间示例地址：
+        `https://www.example.com/live/xxxx`
+
+  - type: textarea
+    attributes:
+      label: 💡 动机
+      description: 描述你提出该feature的动机，以及没有这项feature对你的使用造成了怎样的影响。
+      placeholder: |
+        我需要这个功能是因为...

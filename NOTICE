@@ -1,0 +1,15 @@
+DouyinLiveRecorder-Web 1.0.0
+
+Based on ihmily/DouyinLiveRecorder v4.0.7
+Upstream: https://github.com/ihmily/DouyinLiveRecorder
+Commit: fec734ae74aabef862996177a78c3e8cc1dcc7ee
+Original author: Hmily
+Original license: MIT (see LICENSE)
+
+The web console, YouTube input/proxy adapters, persistent HEVC postprocessor,
+first-run initialization, deployment documentation, and tests are additions
+maintained by this independent project. Original source copyright headers
+are preserved. The unmodified upstream README is retained in docs/UPSTREAM_README.md.
+
+Build-time dependencies (including FFmpeg, yt-dlp, Python, Node.js, Intel
+media drivers, and Python packages) retain their respective licenses.

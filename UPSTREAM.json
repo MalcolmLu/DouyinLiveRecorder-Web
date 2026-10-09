@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/ihmily/DouyinLiveRecorder",
+  "tag": "v4.0.7",
+  "commit": "fec734ae74aabef862996177a78c3e8cc1dcc7ee",
+  "license": "MIT",
+  "project": "DouyinLiveRecorder-Web",
+  "version": "1.0.0",
+  "changes": [
+    "YouTube live extraction and authenticated proxy tunnel",
+    "HTML console and per-room recording settings",
+    "Persistent H.265 Intel QSV postprocessing queue"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "crf": 24,
+  "preset": "veryfast",
+  "cpu_threads": 2,
+  "copy_already_hevc": true,
+  "encoder": "hevc_qsv",
+  "qsv_device": "/dev/dri/renderD128",
+  "qsv_quality": 24,
+  "qsv_preset": "fast"
+}

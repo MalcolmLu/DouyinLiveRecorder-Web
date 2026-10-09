@@ -1,0 +1,35 @@
+# Private persistent data and local settings.
+data/
+config/
+downloads/
+logs/
+backup_config/
+.env
+.env.*
+!.env.example
+**/state/
+**/runtime/
+**/vendor/
+**/__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.lock
+*.pid
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.venv/
+venv/
+.DS_Store
+*.zip
+*.tar.gz
+*.mp4
+*.ts
+*.mkv
+*.flv
+# Keep defaults and source; do not put live configs in these directories.

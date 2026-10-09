@@ -1,0 +1,37 @@
+name: 🚀 (English)Feature request
+description: Propose new ideas or suggestions for the project.
+title: 🚀[Feature] Please enter a title
+labels: enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        📝 **Please fill in a concise and clear title in the `title` above**, the format is suggested as: 🚀[Feature] Short description.
+        For example: 🚀[Feature] Add xx live recording.
+  - type: checkboxes
+    attributes:
+      label: ⚠️ Search for similar issues
+      description: >
+        🔍 [Click here to search historical issues](https://github.com/MalcolmLu/DouyinLiveRecorder-Web/issues?q=is%3Aissue) using keywords to ensure there are no duplicate issues.
+      options:
+        - label: I have searched the issues and found no similar issues
+          required: true
+  - type: textarea
+    attributes:
+      label: 📜 Feature description
+      description: Please describe in detail the feature you would like to add, including how it should work and what its expected outcomes are.
+      placeholder: |
+        Feature description:
+  - type: textarea
+    attributes:
+      label: 🌐 Example (Optional)
+      description: If possible, provide examples, screenshots, or related URLs related to the feature.
+      placeholder: |
+        Live room example URL:
+        `https://www.example.com/live/xxxx`
+  - type: textarea
+    attributes:
+      label: 💡 Motivation
+      description: Describe the motivation behind your feature request and how not having this feature impacts your use of the project.
+      placeholder: |
+        I need this feature because...

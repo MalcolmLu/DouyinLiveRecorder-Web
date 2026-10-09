@@ -1,0 +1,61 @@
+name: douyin-live-recorder-web
+
+x-common: &common
+  build: .
+  image: douyin-live-recorder-web:local
+  platform: linux/amd64
+  restart: unless-stopped
+  environment: &environment
+    TZ: ${TZ:-Asia/Shanghai}
+    PYTHONDONTWRITEBYTECODE: "1"
+    RECORDER_CONFIG_DIR: /app/config
+    RECORDER_DOWNLOADS_DIR: /app/downloads
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  recorder:
+    <<: *common
+    container_name: douyin-live-recorder-web-recorder
+    init: true
+    stop_grace_period: 60s
+    devices:
+      - "${GPU_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128:rw"
+    volumes:
+      - ./data/config:/app/config
+      - ./data/downloads:/app/downloads
+      - ./data/logs:/app/logs
+      - ./data/backup_config:/app/backup_config
+    command: ["python", "-u", "/app/main.py"]
+
+  web:
+    <<: *common
+    container_name: douyin-live-recorder-web-console
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 256m
+    ports:
+      - "${NAS_HOST:-127.0.0.1}:${WEB_PORT:-18888}:18888"
+    environment:
+      <<: *environment
+      GUI_PORT: "18888"
+      GUI_ALLOWED_HOSTS: "${NAS_HOST:-127.0.0.1}:${WEB_PORT:-18888},localhost:18888,127.0.0.1:18888"
+    volumes:
+      - ./data/config:/app/config
+      - ./data/downloads:/app/downloads:ro
+    command: ["python", "/app/gui/serve.py"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import ssl,urllib.request;c=ssl.create_default_context(cafile='/app/config/gui/state/tls/server.crt');urllib.request.urlopen('https://localhost:18888/health',context=c,timeout=5)"
+      interval: 30s
+      timeout: 8s
+      retries: 3

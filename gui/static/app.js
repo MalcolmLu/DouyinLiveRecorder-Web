@@ -1,0 +1,293 @@
+const $ = (s) => document.querySelector(s);
+const ctx = {csrf:null, snapshot:null, page:"live", jobPage:1, jobs:null, revision:null, settingsRevision:null, proxyRevision:null, busy:false};
+const statusText = {unknown:"等待检测", checking:"检测中", offline:"等待开播", live:"正在直播",
+  recording:"正在录制", disabled:"已暂停", error:"采集异常", queued:"排队中", running:"转码中",
+  published:"验证后收尾", done:"已完成", failed:"失败"};
+let toastTimer, searchTimer;
+
+class ApiError extends Error {
+  constructor(message, status, code) {super(message); this.status=status; this.code=code;}
+}
+async function api(path, options={}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(path, {
+      ...options, credentials:"same-origin", signal:controller.signal,
+      headers:{"Content-Type":"application/json", ...(ctx.csrf ? {"X-CSRF-Token":ctx.csrf} : {}), ...(options.headers || {})}
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status===401 && path!=="/api/login") showLogin();
+      throw new ApiError(data.error?.message || "暂时无法完成操作，请稍后重试。", response.status, data.error?.code);
+    }
+    return data;
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    throw new ApiError(e.name==="AbortError" ? "连接超时，请稍后重试。" : "无法连接管理服务，请检查网络。",0,"network");
+  } finally { clearTimeout(timeout); }
+}
+function node(tag, text, className) {
+  const e=document.createElement(tag);
+  if(text!==undefined && text!==null) e.textContent=String(text);
+  if(className) e.className=className;
+  return e;
+}
+function setText(selector, value) {$(selector).textContent=String(value);}
+function bytes(n) {
+  if(n===null || n===undefined) return "—";
+  const a=Math.abs(n); const units=["B","KB","MB","GB","TB"];
+  let i=0, value=a;
+  while(value>=1000 && i<units.length-1) {value/=1000;i++;}
+  return (n<0 ? "−" : "") + new Intl.NumberFormat("zh-CN",{maximumFractionDigits:i>=3 ? 1 : 0}).format(value)+" "+units[i];
+}
+function elapsed(epoch) {
+  if(!epoch) return "—";
+  const s=Math.max(0,Math.floor(Date.now()/1000-epoch));
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60);
+  return (h ? h+" 小时 " : "")+m+" 分钟";
+}
+function shortTime(epoch) {
+  return epoch ? new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:"Asia/Taipei"}).format(new Date(epoch*1000)) : "—";
+}
+function badge(state) {return node("span",statusText[state] || "未知", "status "+(Object.hasOwn(statusText,state) ? state : "unknown"));}
+function toast(message) {
+  clearTimeout(toastTimer);setText("#toast",message);$("#toast").hidden=false;
+  toastTimer=setTimeout(() => {$("#toast").hidden=true;},5000);
+}
+function globalError(message="") {setText("#global-error",message);$("#global-error").hidden=!message;}
+function showLogin() {$("#app-view").hidden=true;$("#login-view").hidden=false;ctx.csrf=null;}
+function showApp() {$("#login-view").hidden=true;$("#app-view").hidden=false;}
+function button(text, fn, className="row-button") {
+  const b=node("button",text,className);b.type="button";b.addEventListener("click",fn);return b;
+}
+async function action(buttonElement, fn, errorSelector=null) {
+  buttonElement.disabled=true;
+  if(errorSelector) setText(errorSelector,"");
+  try {await fn();}
+  catch(e) {if(errorSelector) setText(errorSelector,e.message); else toast(e.message);}
+  finally {buttonElement.disabled=false;}
+}
+
+function renderRooms() {
+  const data=ctx.snapshot; if(!data) return;
+  setText("#metric-rooms",data.monitoring_count);
+  setText("#metric-recording",data.recording_count);
+  setText("#metric-queue",data.queue.queued+data.queue.running+(data.queue.published||0));
+  setText("#metric-queue-note",data.queue.running ? "1 个正在处理，其余按序排队" : "按顺序自动处理");
+  setText("#metric-saved",bytes(data.queue.saved_bytes));
+  setText("#nav-rooms",data.monitoring_count);setText("#nav-jobs",data.queue.queued+data.queue.running);
+  setText("#last-update","更新于 "+shortTime(data.updated));
+  const connection=$("#connection");connection.classList.toggle("offline",!data.recorder.connected);
+  connection.lastElementChild.textContent=data.recorder.connected ? "采集器已连接" : "采集器未连接";
+  $("#room-loading").hidden=true;$("#room-empty").hidden=data.rooms.length>0;$("#room-table-wrap").hidden=!data.rooms.length;
+  const body=$("#room-table");body.replaceChildren();
+  for(const room of data.rooms) {
+    const tr=node("tr");
+    const main=node("td");const cell=node("div",null,"room-cell");
+    const initials={"哔哩哔哩":"B站","虎牙":"虎牙","YouTube":"YT","抖音":"抖音","Twitch":"TW","TikTok":"TK"};
+    cell.append(node("span",initials[room.platform] || room.platform.slice(0,2),"platform-avatar"));
+    const title=node("div");title.append(node("div",room.display_name,"cell-title"),node("div",room.platform+" · "+room.url,"cell-subtitle"));
+    cell.append(title);main.append(cell);tr.append(main);
+    const state=node("td");state.append(badge(room.state));if(room.last_error){const sub=node("div","检测失败，稍后自动重试","cell-subtitle");sub.title=room.last_error;state.append(sub);}tr.append(state);
+    const route=node("td");route.append(node("span",room.uses_proxy ? "共享代理" : "直连","route-tag"+(room.uses_proxy ? " proxy" : "")));
+    if(room.applied_proxy!==null && room.applied_proxy!==undefined && room.applied_proxy!==room.uses_proxy && room.state==="recording") route.append(node("div","下次检测生效","cell-subtitle"));
+    tr.append(route,node("td",room.quality),node("td",room.state==="recording" ? elapsed(room.started_at) : "—"));
+    const controls=node("td",null,"align-right"), actions=node("div",null,"actions");
+    actions.append(button("编辑",() => openRoom(room)));
+    const toggle=button(room.enabled ? "暂停监控" : "恢复监控",() => action(toggle,async() => {
+      if(room.state==="recording" && !window.confirm("暂停会结束这个直播间当前的录制，已写入的视频会保留并按设置处理。是否暂停？")) return;
+      await api("/api/rooms/"+room.id,{method:"PATCH",body:JSON.stringify({enabled:!room.enabled,revision:ctx.snapshot.revision})});
+      toast(room.enabled ? "已暂停监控。" : "已恢复监控，采集器将自动检测。");await refresh();
+    }));
+    const remove=button("删除",()=>action(remove,async()=>{
+      if(!window.confirm("删除“"+room.name+"”的监控任务？已录制的视频和转码记录会保留。")) return;
+      await api("/api/rooms/"+room.id,{method:"DELETE",body:JSON.stringify({revision:ctx.snapshot.revision})});
+      toast("直播间已删除，录像已保留。");await refresh();
+    }));
+    actions.append(toggle,remove);controls.append(actions);tr.append(controls);body.append(tr);
+  }
+}
+function renderSummary() {
+  const q=ctx.snapshot?.queue;if(!q) return;
+  const target=$("#queue-summary");target.replaceChildren();
+  for(const [key,label] of [["running","处理中"],["queued","排队中"],["done","已完成"],["failed","失败"]]){
+    const d=node("span",label);d.append(node("strong",q[key]||0));target.append(d);
+  }
+}
+function renderJobs(data) {
+  ctx.jobs=data;const body=$("#job-table");body.replaceChildren();
+  $("#jobs-empty").hidden=data.items.length>0;$("#job-table-wrap").hidden=!data.items.length;
+  setText("#jobs-total",data.total+" 个任务");setText("#page-label","第 "+data.page+" 页 / 共 "+Math.max(1,Math.ceil(data.total/data.page_size))+" 页");
+  $("#previous-page").disabled=data.page<=1;$("#next-page").disabled=data.page*data.page_size>=data.total;
+  let active=null;
+  for(const job of data.items) {
+    const tr=node("tr"), title=node("td");
+    const t=node("div",job.name,"cell-title");t.title=job.name;
+    title.append(t,node("div",job.path,"cell-subtitle"));tr.append(title);
+    const status=node("td");status.append(badge(job.status));
+    const progress=ctx.snapshot?.progress;
+    if(job.status==="running") {
+      active=job;
+      if(progress?.job_id===job.id && progress.percent!==null) {
+        const p=node("progress");p.max=100;p.value=progress.percent;p.setAttribute("aria-label","已转码 "+progress.percent+"%");status.append(p,node("div",progress.percent+"%","cell-subtitle"));
+      }
+    }
+    tr.append(status,node("td",bytes(job.size)),node("td",bytes(job.output_size)));
+    const savings=node("td",job.saved_percent===null ? "—" : (job.saved_percent>=0 ? "减少 " : "增加 ")+Math.abs(job.saved_percent)+"%",job.saved_percent===null ? "" : job.saved_percent>=0 ? "positive" : "negative");
+    tr.append(savings);
+    const control=node("td",null,"align-right"), actions=node("div",null,"actions");
+    if(job.status==="failed"){
+      actions.append(button("查看原因",()=>{setText("#error-detail",job.error || "没有记录到详细错误。");$("#error-dialog").showModal();}));
+      const retry=button("重试",()=>action(retry,async()=>{
+        await api("/api/jobs/"+job.id+"/retry",{method:"POST",body:"{}"});toast("任务已重新排队。");await refresh();
+      }));actions.append(retry);
+    } else {actions.append(node("span",job.status==="done" ? "已验证" : "自动处理","muted"));}
+    const remove=button("删除记录",()=>action(remove,async()=>{
+      if(!window.confirm("删除“"+job.name+"”的转码记录？原录像和转码后的视频都会保留。")) return;
+      const result=await api("/api/jobs/"+job.id,{method:"DELETE"});
+      toast(result.message);await refresh();
+    }));
+    remove.disabled=!["done","failed"].includes(job.status);
+    remove.title=remove.disabled ? "排队中或处理中，请等待任务结束后删除记录。" : "仅删除记录，保留录像文件。";
+    actions.append(remove);
+    control.append(actions);tr.append(control);body.append(tr);
+  }
+  $("#active-encoding").hidden=!active;
+  if(active){
+    setText("#active-name",active.name);
+    const p=ctx.snapshot?.progress, matches=p?.job_id===active.id;
+    setText("#active-percent",matches && p.percent!==null ? p.percent+"%" : "读取中");
+    const bar=$("#active-progress");
+    if(matches && p.percent!==null) bar.value=p.percent;else bar.removeAttribute("value");
+    setText("#active-detail",matches ? "已处理 "+Math.floor(p.processed_seconds/60)+" 分钟 / 共 "+Math.ceil(p.duration/60)+" 分钟"+(p.speed>0 ? " · "+p.speed.toFixed(1)+"×" : "") : "正在编码，等待编码器上报进度。");
+  }
+}
+async function loadJobs() {
+  const params=new URLSearchParams({status:$("#job-filter").value,search:$("#job-search").value,page:String(ctx.jobPage)});
+  let data=await api("/api/jobs?"+params);
+  const lastPage=Math.max(1,Math.ceil(data.total/data.page_size));
+  if(data.page>lastPage){
+    ctx.jobPage=lastPage;params.set("page",String(lastPage));
+    data=await api("/api/jobs?"+params);
+  }
+  renderJobs(data);
+}
+async function refresh() {
+  if(!ctx.csrf || ctx.busy) return;
+  ctx.busy=true;
+  try {
+    ctx.snapshot=await api("/api/dashboard");renderRooms();renderSummary();
+    if(ctx.page==="jobs") await loadJobs();
+    globalError("");
+  } catch(e){globalError(e.message);}
+  finally{ctx.busy=false;}
+}
+async function openPage(page) {
+  ctx.page=page;
+  document.querySelectorAll(".page").forEach(e=>e.hidden=e.id!=="page-"+page);
+  document.querySelectorAll(".nav-item").forEach(e=>e.classList.toggle("active",e.dataset.page===page));
+  if(location.hash!=="#"+page) history.replaceState(null,"","#"+page);
+  try{
+    if(page==="jobs") await loadJobs();
+    if(page==="settings") await loadSettings();
+    if(page==="proxy") await loadProxy();
+  }catch(e){globalError(e.message);}
+}
+function openRoom(room=null) {
+  const form=$("#room-form");form.reset();form.dataset.id=room?.id || "";
+  form.elements.url.value=room?.url || "";form.elements.url.readOnly=false;
+  form.elements.name.value=room?.name || "";form.elements.quality.value=room?.quality || ctx.snapshot?.default_quality || "原画";
+  form.elements.use_proxy.checked=room?.uses_proxy || false;
+  setText("#room-dialog-title",room ? "编辑直播间" : "新增直播间");
+  setText("#save-room",room ? "保存直播间" : "添加并开始监控");
+  setText("#room-error","");
+  setText("#room-url-hint",room ? "可修改直播间链接；正在录制时请先暂停，等待录像保存完成。YouTube 频道链接会自动规范为 /live。" : "支持录制器已有的直播平台；YouTube 频道链接会自动规范为 /live。");
+  setText("#room-proxy-hint",ctx.snapshot?.recorder.proxy_ready ? "使用已保存的代理，账号与密码不会回显。" : "尚未配置共享代理，请先到“代理设置”保存。");
+  $("#room-dialog").showModal();
+}
+async function loadSettings() {
+  const data=await api("/api/settings");ctx.settingsRevision=data.revision;
+  const form=$("#settings-form");
+  for(const [key,value] of Object.entries(data.values)){
+    const input=form.elements[key];if(!input)continue;
+    if(input.type==="checkbox") input.checked=value;else input.value=value;
+  }
+  $("#settings-pending").hidden=!data.pending;
+  setText("#settings-state",data.pending ? "有设置等待应用" : "配置已读取");
+  updateSettingsDependencies();setText("#settings-error","");
+}
+function updateSettingsDependencies() {
+  const f=$("#settings-form");
+  f.elements.segment_seconds.disabled=!f.elements.segment_enabled.checked;
+  f.elements.h265.disabled=f.elements.post_format.value!=="mp4";
+  f.elements.qsv_quality.disabled=f.elements.post_format.value!=="mp4" || !f.elements.h265.checked;
+  f.elements.delete_original.disabled=f.elements.post_format.value!=="mp4";
+}
+async function loadProxy() {
+  const data=await api("/api/proxy");ctx.proxyRevision=data.revision;const f=$("#proxy-form");f.reset();f.elements.server.value=data.server;
+  setText("#proxy-state",data.configured ? "已保存共享代理" : "尚未配置");
+  setText("#stored-username",data.has_username ? "已保存用户名，留空可保留。" : "没有已保存的用户名。");
+  setText("#stored-password",data.has_password ? "已保存密码，留空可保留；密码不会回显。" : "没有已保存的密码。");
+  setText("#proxy-error","");
+}
+
+$("#login-form").addEventListener("submit",(e)=>{
+  e.preventDefault();const buttonElement=e.submitter;
+  action(buttonElement,async()=>{
+    const data=await api("/api/login",{method:"POST",body:JSON.stringify({password:$("#login-password").value})});
+    $("#login-password").value="";ctx.csrf=data.csrf;showApp();await refresh();await openPage(ctx.page);
+  },"#login-error");
+});
+$("#logout").addEventListener("click",()=>action($("#logout"),async()=>{await api("/api/logout",{method:"POST",body:"{}"});showLogin();}));
+document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>openPage(b.dataset.page)));
+$("#add-room").addEventListener("click",()=>openRoom());$("#add-first-room").addEventListener("click",()=>openRoom());
+for(const id of ["#close-room","#cancel-room"]) $(id).addEventListener("click",()=>$("#room-dialog").close());
+$("#close-error").addEventListener("click",()=>$("#error-dialog").close());
+$("#room-form").addEventListener("submit",e=>{
+  e.preventDefault();const f=e.currentTarget;
+  action(e.submitter,async()=>{
+    const data={url:f.elements.url.value,name:f.elements.name.value,quality:f.elements.quality.value,
+      proxy:f.elements.use_proxy.checked ? "shared" : "direct",revision:ctx.snapshot.revision};
+    await api(f.dataset.id ? "/api/rooms/"+f.dataset.id : "/api/rooms",{method:f.dataset.id ? "PATCH" : "POST",body:JSON.stringify(data)});
+    $("#room-dialog").close();toast(f.dataset.id ? "直播间已保存，下次检测时生效。" : "直播间已添加，采集器会自动开始检测。");await refresh();
+  },"#room-error");
+});
+$("#settings-form").addEventListener("change",updateSettingsDependencies);
+$("#settings-form").addEventListener("submit",e=>{
+  e.preventDefault();const f=e.currentTarget;
+  action(e.submitter,async()=>{
+    const values={};
+    for(const key of ["segment_enabled","delete_original","h265"])values[key]=f.elements[key].checked;
+    for(const key of ["segment_seconds","poll_seconds","qsv_quality"])values[key]=Number(f.elements[key].value);
+    for(const key of ["record_format","quality","post_format"])values[key]=f.elements[key].value;
+    const result=await api("/api/settings",{method:"PUT",body:JSON.stringify({values,revision:ctx.settingsRevision})});
+    toast(result.message);await loadSettings();await refresh();
+  },"#settings-error");
+});
+$("#proxy-form").addEventListener("submit",e=>{
+  e.preventDefault();const f=e.currentTarget;
+  action(e.submitter,async()=>{
+    const result=await api("/api/proxy",{method:"PUT",body:JSON.stringify({
+      server:f.elements.server.value,username:f.elements.username.value,password:f.elements.password.value,
+      clear_auth:f.elements.clear_auth.checked,revision:ctx.proxyRevision})});
+    f.elements.password.value="";toast(result.message);await loadProxy();await refresh();
+  },"#proxy-error");
+});
+$("#refresh-jobs").addEventListener("click",()=>action($("#refresh-jobs"),refresh));
+$("#job-filter").addEventListener("change",()=>{ctx.jobPage=1;loadJobs().catch(e=>globalError(e.message));});
+$("#job-search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ctx.jobPage=1;loadJobs().catch(e=>globalError(e.message));},350);});
+$("#previous-page").addEventListener("click",()=>{ctx.jobPage--;loadJobs().catch(e=>globalError(e.message));});
+$("#next-page").addEventListener("click",()=>{ctx.jobPage++;loadJobs().catch(e=>globalError(e.message));});
+async function initialize(){
+  try{
+    const session=await api("/api/session");$("#setup-notice").hidden=!session.setup_required;
+    $("#environment-banner").hidden=session.environment!=="development";
+    if(session.authenticated){ctx.csrf=session.csrf;showApp();await refresh();
+      const requested=location.hash.slice(1);await openPage(["live","jobs","settings","proxy"].includes(requested) ? requested : "live");
+    } else showLogin();
+  }catch(e){showLogin();setText("#login-error",e.message);}
+}
+setInterval(()=>{if(!document.hidden)refresh();},5000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
+initialize();
