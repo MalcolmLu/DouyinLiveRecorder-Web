@@ -33,6 +33,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t dlr-web:test .
+      # Docker's official ECR mirror avoids anonymous Docker Hub runner limits.
+      - run: >-
+          docker build -t dlr-web:test
+          --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
+          --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-trixie .
       - run: docker run --rm dlr-web:test python h265/selftest.py
       - run: python scripts/container_smoke.py dlr-web:test

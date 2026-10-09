@@ -4,6 +4,14 @@
 
 根目录 README 提供完整命令。先构建镜像，再生成对应 NAS IPv4 地址的 HTTPS 证书、在终端设置管理密码，最后启动两个服务。没有预置密码，也不提供免登录设置密码接口。
 
+如 Docker Hub 返回 429 拉取限速，可通过 Docker 官方的 Amazon ECR 镜像源构建；本仓库 CI 使用此来源。参考 [Docker 官方说明](https://www.docker.com/blog/news-from-aws-reinvent-docker-official-images-on-amazon-ecr-public/)。
+
+~~~sh
+docker compose build \
+  --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim \
+  --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-trixie
+~~~
+
 `docker compose run --rm --no-deps web ...` 不发布网页端口，也不需要核显映射，可用于设置密码和证书。设备只映射给 recorder 服务；web 服务的根文件系统只读，录像目录也只读。
 
 ## 极空间

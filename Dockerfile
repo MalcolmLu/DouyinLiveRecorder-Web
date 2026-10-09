@@ -1,5 +1,7 @@
-FROM node:22-bookworm-slim AS node
-FROM python:3.11-slim-trixie
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG PYTHON_IMAGE=python:3.11-slim-trixie
+FROM ${NODE_IMAGE} AS node
+FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="DouyinLiveRecorder-Web" \
       org.opencontainers.image.source="https://github.com/MalcolmLu/DouyinLiveRecorder-Web" \
