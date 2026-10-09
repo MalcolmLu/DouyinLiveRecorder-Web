@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>录播控制台</title>
+  <title>DouyinLiveRecorder-Web · 录播控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
   <script type="module" src="/static/app.js"></script>
@@ -22,7 +22,7 @@
         <p class="field-error" id="login-error" role="alert"></p>
         <button class="primary full" type="submit">登录控制台</button>
       </form>
-      <div id="setup-notice" class="notice" hidden>尚未设置网页管理密码。请在 NAS 的网页管理容器控制台运行 <code>python /opt/recorder-web/manage.py set-password</code>，自行输入两次密码后刷新页面。</div>
+      <div id="setup-notice" class="notice" hidden>尚未设置网页管理密码。请在 NAS 的网页管理容器控制台运行 <code>python /app/gui/manage.py set-password</code>，自行输入两次密码后刷新页面。</div>
       <p class="login-foot">视频与配置保存在你的 NAS 中。</p>
     </div>
   </section>
@@ -40,7 +40,7 @@
       <div class="sidebar-bottom">
         <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small>Intel QSV · 单任务队列</small></div></div>
         <button id="logout" class="text-button">退出登录</button>
-        <span class="version">DouyinLiveRecorder v4.0.7</span>
+        <span class="version">DouyinLiveRecorder-Web 1.0.0 · Core v4.0.7</span>
       </div>
     </aside>
 
