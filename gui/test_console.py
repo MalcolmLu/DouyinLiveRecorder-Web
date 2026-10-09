@@ -1,6 +1,7 @@
 """Integration tests run only against isolated temporary configuration and media."""
 import ast
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import hashlib
 import json
 import logging
@@ -244,7 +245,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/jobs?status=failed&search=fixture").json["total"], 0)
         self.assertEqual(self.client.get("/api/dashboard").json["queue"]["failed"], 0)
         self.assertEqual(self.client.post(path + "/retry", json={}, headers=self.headers).status_code, 404)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (self.job_id,)).fetchone()
             self.assertIsNotNone(row)
             db.execute("INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
@@ -255,14 +256,14 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual((source.read_bytes(), output.read_bytes()), original)
 
     def test_delete_completed_job_keeps_saved_space_and_active_tasks_visible(self):
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             db.execute("UPDATE jobs SET status='done',size=100,output_size=40")
         path = "/api/jobs/" + self.job_id
         self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 200)
         queue = self.client.get("/api/dashboard").json["queue"]
         self.assertEqual((queue["done"], queue["saved_bytes"]), (0, 60))
         for status in ("queued", "running", "published"):
-            with sqlite3.connect(self.paths.queue) as db:
+            with closing(sqlite3.connect(self.paths.queue)) as db, db:
                 db.execute("UPDATE jobs SET status=?", (status,))
             self.assertEqual(self.client.get("/api/jobs").json["items"][0]["status"], status)
             self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 409)
@@ -276,10 +277,10 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.client.delete("/api/jobs/invalid", headers=self.headers).status_code, 422)
         self.assertEqual(self.client.delete("/api/jobs/" + "b"*64, headers=self.headers).status_code, 404)
         self.assertEqual(self.client.get("/api/jobs").json["total"], 1)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='deleted_jobs'").fetchone())
         self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 200)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             self.assertEqual(db.execute("SELECT count(*) FROM deleted_jobs").fetchone()[0], 1)
 
     def test_delete_and_retry_serialize_without_hidden_active_work(self):
@@ -295,7 +296,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(results.count(200), 1)
         self.assertIn(next(code for code in results if code != 200), (404, 409))
         data = queue.jobs("all", "", 1)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             status = db.execute("SELECT status FROM jobs WHERE id=?", (self.job_id,)).fetchone()[0]
         self.assertEqual(data["total"], 1 if status == "queued" else 0)
 
