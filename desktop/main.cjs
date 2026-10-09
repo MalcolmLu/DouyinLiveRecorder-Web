@@ -120,7 +120,13 @@ async function start(){
     ]));
   }
   logShell("tray-created",{image_empty:image.isEmpty(),bounds:tray.getBounds()});
-  tray.on("click",()=>showWindow("tray-click"));tray.on("double-click",()=>showWindow("tray-double-click"));
+  tray.on("click",()=>{
+    logShell("tray-clicked");
+    if(process.platform!=="darwin")showWindow("tray-click");
+  });
+  tray.on("double-click",()=>{
+    if(process.platform!=="darwin")showWindow("tray-double-click");
+  });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform==="darwin"?[{label:app.name,submenu:[{role:"about"},{type:"separator"},{label:"显示窗口",click:showWindow},
       {label:"退出并保存录像",accelerator:"Cmd+Q",click:()=>app.quit()}]}]:[]),
