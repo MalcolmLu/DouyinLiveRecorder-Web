@@ -344,7 +344,7 @@ $("#test-encoder").addEventListener("click",()=>action($("#test-encoder"),async(
 async function initialize(){
   try{
     const session=await api("/api/session");ctx.desktop=!!session.desktop;$("#desktop-nav").hidden=!ctx.desktop;$("#logout").hidden=ctx.desktop;
-    if(ctx.desktop){setText("#workspace-name","我的电脑");setText("#app-version","DouyinLiveRecorder Desktop 1.1.0 · Core v4.0.7");}$("#setup-notice").hidden=!session.setup_required;
+    if(ctx.desktop){setText("#workspace-name","我的电脑");setText("#app-version","DouyinLiveRecorder Desktop 1.1.1 · Core v4.0.7");}$("#setup-notice").hidden=!session.setup_required;
     $("#environment-banner").hidden=session.environment!=="development";
     if(session.authenticated){ctx.csrf=session.csrf;showApp();await refresh();
       const requested=location.hash.slice(1);await openPage(["live","jobs","settings","proxy",...(ctx.desktop?["desktop"]:[])].includes(requested) ? requested : "live");

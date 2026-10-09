@@ -4,7 +4,7 @@
   "commit": "fec734ae74aabef862996177a78c3e8cc1dcc7ee",
   "license": "MIT",
   "project": "DouyinLiveRecorder-Web",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "changes": [
     "YouTube live extraction and authenticated proxy tunnel",
     "HTML console and per-room recording settings",
