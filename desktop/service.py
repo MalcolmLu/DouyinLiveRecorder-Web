@@ -236,7 +236,8 @@ class DesktopService:
         interrupted=None
         if self.paths.queue.exists():
             with queue.connect() as db:
-                interrupted=db.execute("SELECT * FROM jobs WHERE status='running' LIMIT 1").fetchone()
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
+                    interrupted=db.execute("SELECT * FROM jobs WHERE status='running' LIMIT 1").fetchone()
         self._terminate(self.worker);self.worker=None
         if interrupted:
             source=Path(interrupted["source"])
