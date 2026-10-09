@@ -261,7 +261,8 @@ def encode(job):
             raise ValueError('Source became active or changed; original retained')
         if destination != source and destination.exists():
             raise FileExistsError('Destination appeared; original retained')
-        with temporary.open('rb') as stream:
+        # Windows FlushFileBuffers requires a writable file handle.
+        with temporary.open('rb+') as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
         sync_directory(destination.parent)

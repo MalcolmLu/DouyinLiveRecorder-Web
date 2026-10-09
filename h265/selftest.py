@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+selected_encoder = (sys.argv[sys.argv.index('--encoder')+1] if '--encoder' in sys.argv else
+                    'hevc_qsv' if '--hardware' in sys.argv else 'libx265')
 script = Path(__file__).with_name('postprocess.py')
 spec = importlib.util.spec_from_file_location('h265_test_module', script)
 module = importlib.util.module_from_spec(spec)
@@ -22,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
     (module.HOME / 'settings.json').write_text(json.dumps({
         'enabled': True, 'crf': 24, 'preset': 'veryfast', 'cpu_threads': 2,
         'copy_already_hevc': True,
-        'encoder': 'hevc_qsv' if '--hardware' in sys.argv else 'libx265'}))
+        'encoder': selected_encoder}))
     source = module.ROOT / 'success.ts'
     subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
                     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15',
@@ -95,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
     assert module.probe(kept_mp4.with_name('kept-original.H265.mp4'))[1]['codec_name'] == 'hevc'
     progress = json.loads((module.HOME / 'current-job.json').read_text())
     assert progress['job_id'] == identifier and progress['duration'] > 0
-    assert progress['encoder'] == ('hevc_qsv' if '--hardware' in sys.argv else 'libx265')
+    assert progress['encoder'] == (selected_encoder)
     assert 'progress=end' in (module.HOME / 'progress.txt').read_text()
     print('PASS MP4 original preserved with separate H265 output; real progress emitted')
 
