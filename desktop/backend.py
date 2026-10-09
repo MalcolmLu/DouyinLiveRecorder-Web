@@ -48,6 +48,8 @@ def main():
     os.environ["SSL_CERT_FILE"]=certifi.where()
     service=DesktopService(paths,data,Path(args.tools_dir).resolve() if args.tools_dir else None)
     paths=service.paths
+    processor=runpy.run_path(str(ROOT/"h265/postprocess.py"))
+    with processor["connect"]():pass
     application=create_app(paths,desktop=service)
     server=create_server(application,host="127.0.0.1",port=0,threads=4,expose_tracebacks=False)
     host="127.0.0.1:"+str(server.effective_port)

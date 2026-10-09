@@ -95,6 +95,12 @@ class DesktopTests(unittest.TestCase):
             with lock:atomic_write(target,'{"saved":true}')
         self.assertEqual(json.loads(target.read_text()),{"saved":True})
 
+    def test_queue_file_before_worker_schema_is_treated_as_empty(self):
+        self.paths.queue.touch()
+        repository=QueueRepository(self.paths)
+        self.assertEqual(repository.summary()["running"],0)
+        self.assertEqual(repository.jobs("all","",1)["items"],[])
+
     def test_exit_requeues_interrupted_job_and_keeps_historical_failure(self):
         source=self.paths.downloads/"interrupted.ts"
         source.parent.mkdir(exist_ok=True);source.write_bytes(b"retained original")
