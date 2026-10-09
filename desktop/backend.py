@@ -76,6 +76,8 @@ def main():
     service.start_worker()
     try:
         server.run()
+    except OSError:
+        if not service.closed.is_set():raise
     finally:
         service.shutdown()
         auth.delete_session(hashed)
