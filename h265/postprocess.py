@@ -2,7 +2,6 @@
 """Persistent, single-worker post-recording queue for DouyinLiveRecorder."""
 import argparse
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import logging
@@ -13,6 +12,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"gui"))
+from platform_utils import acquire_lock, child_command, process_options, recording_relative, recording_roots, sync_directory
 
 HOME = Path(os.environ.get('RECORDER_CONFIG_DIR', '/app/config')).resolve() / 'h265'
 RUNTIME = HOME / 'runtime/usr/lib/x86_64-linux-gnu'
@@ -35,8 +36,9 @@ def settings():
     if result['preset'] not in ('ultrafast', 'superfast', 'veryfast', 'faster',
                                 'fast', 'medium', 'slow', 'slower', 'veryslow'):
         raise ValueError('Unsupported encoding preset')
-    result['cpu_threads'] = max(1, min(4, int(result['cpu_threads'])))
-    if result['encoder'] not in ('libx265', 'hevc_qsv'):
+    result['cpu_threads'] = max(1, min(16, int(result['cpu_threads'])))
+    result['bitrate_kbps'] = max(500,min(100000,int(result.get('bitrate_kbps',4000))))
+    if result['encoder'] not in ('libx265', 'hevc_qsv', 'hevc_videotoolbox', 'hevc_nvenc', 'hevc_amf'):
         raise ValueError('Unsupported HEVC encoder')
     if not 1 <= int(result['qsv_quality']) <= 51:
         raise ValueError('QSV quality must be between 1 and 51')
@@ -73,7 +75,7 @@ def connect():
 
 def enqueue(file, delete_source=True, h264=False):
     file = Path(file).resolve(strict=True)
-    file.relative_to(ROOT)
+    recording_relative(file,recording_roots(HOME.parent,ROOT))
     if not file.is_file() or file.suffix.lower() not in ('.ts', '.flv', '.mkv', '.mp4'):
         raise ValueError('Only recorded video files are accepted')
     stat = file.stat()
@@ -91,19 +93,24 @@ def enqueue(file, delete_source=True, h264=False):
 
 
 def ensure_worker():
-    # The worker's flock is authoritative; no PID-file assumptions across reboots.
+    if os.environ.get("DLR_DESKTOP_WORKER_MANAGED") == "1":
+        return
+    # The worker lock is authoritative; no PID-file assumptions across reboots.
     HOME.mkdir(parents=True, exist_ok=True)
     with open(HOME / 'worker.lock', 'a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_lock(lock,blocking=False)
         except BlockingIOError:
             return
         with open(HOME / 'worker-startup.log', 'ab') as log:
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker',
-                              '--lock-fd', str(lock.fileno())],
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                             start_new_session=True, close_fds=True,
-                             pass_fds=(lock.fileno(),))
+            if os.name == "nt":
+                subprocess.Popen(child_command("postprocess","--worker"),stdin=subprocess.DEVNULL,
+                                 stdout=log,stderr=log,close_fds=True,**process_options())
+            else:
+                subprocess.Popen([sys.executable,str(Path(__file__).resolve()),"--worker",
+                                  "--lock-fd",str(lock.fileno())],stdin=subprocess.DEVNULL,
+                                 stdout=log,stderr=log,start_new_session=True,close_fds=True,
+                                 pass_fds=(lock.fileno(),))
 
 
 def probe(file):
@@ -122,19 +129,30 @@ def probe(file):
 
 
 def opened_by_ffmpeg(file):
-    wanted = str(file)
-    for name in Path('/proc').glob('[0-9]*/comm'):
-        try:
-            if name.read_text().strip() != 'ffmpeg':
-                continue
-            for fd in name.parent.joinpath('fd').iterdir():
-                try:
-                    if os.readlink(fd) == wanted:
-                        return True
-                except (OSError, PermissionError):
-                    pass
-        except (OSError, PermissionError):
-            pass
+    wanted = os.path.normcase(str(Path(file).resolve()))
+    if os.name != "nt" and Path("/proc").is_dir():
+        for name in Path("/proc").glob("[0-9]*/comm"):
+            try:
+                if name.read_text().strip() != "ffmpeg":
+                    continue
+                for fd in name.parent.joinpath("fd").iterdir():
+                    try:
+                        if os.path.normcase(os.readlink(fd)) == wanted:
+                            return True
+                    except (OSError,PermissionError):
+                        pass
+            except (OSError,PermissionError):
+                pass
+    else:
+        import psutil
+        for process in psutil.process_iter(["name"]):
+            try:
+                if (process.info["name"] or "").lower() not in ("ffmpeg","ffmpeg.exe"):
+                    continue
+                if any(os.path.normcase(item.path)==wanted for item in process.open_files()):
+                    return True
+            except (psutil.NoSuchProcess,psutil.AccessDenied):
+                pass
     return False
 
 
@@ -145,7 +163,7 @@ def unchanged(file, job):
 
 def encode(job):
     source = Path(job['source']).resolve(strict=True)
-    source.relative_to(ROOT)
+    recording_relative(source,recording_roots(HOME.parent,ROOT))
     if not unchanged(source, job):
         raise ValueError('Source changed; original retained')
     if opened_by_ffmpeg(source):
@@ -171,14 +189,17 @@ def encode(job):
            '-threads', '1', '-filter_threads', '1', '-fflags', '+genpts']
     if mode == 'hevc_qsv':
         device = Path(cfg['qsv_device'])
-        if not device.is_char_device() or not os.access(device, os.R_OK | os.W_OK):
+        if os.name != 'nt' and (not device.is_char_device() or not os.access(device, os.R_OK | os.W_OK)):
             raise ValueError('QSV device unavailable; original retained')
         formats = {'yuv420p': 'nv12', 'yuvj420p': 'nv12', 'nv12': 'nv12',
                    'yuv420p10le': 'p010le', 'p010le': 'p010le'}
         if video.get('pix_fmt') not in formats:
             raise ValueError('QSV pixel format unsupported; original retained')
-        cmd += ['-init_hw_device', f'vaapi=va:{device}',
-                '-init_hw_device', 'qsv=qs@va', '-filter_hw_device', 'qs']
+        if os.name == 'nt':
+            cmd += ['-init_hw_device','qsv=qs:hw,child_device_type=d3d11va','-filter_hw_device','qs']
+        else:
+            cmd += ['-init_hw_device', f'vaapi=va:{device}',
+                    '-init_hw_device', 'qsv=qs@va', '-filter_hw_device', 'qs']
     cmd += ['-i', str(source), '-map', '0:v:0', '-map', '0:a?',
            '-map_metadata', '0', '-c:v', mode, '-c:a', 'copy', '-fps_mode', 'passthrough']
     if mode == 'libx265':
@@ -190,6 +211,13 @@ def encode(job):
         cmd += ['-vf', f"format={formats[video['pix_fmt']]},hwupload=extra_hw_frames=64",
                 '-preset', cfg['qsv_preset'], '-global_quality', str(cfg['qsv_quality']),
                 '-look_ahead', '0', '-async_depth', '4']
+    elif mode == 'hevc_videotoolbox':
+        cmd += ['-b:v',str(cfg['bitrate_kbps'])+'k','-allow_sw','0','-pix_fmt','yuv420p']
+    elif mode == 'hevc_nvenc':
+        cmd += ['-preset','p4','-rc','vbr','-cq',str(cfg['qsv_quality']),'-b:v','0','-pix_fmt','yuv420p']
+    elif mode == 'hevc_amf':
+        cmd += ['-quality','balanced','-rc','cqp','-qp_i',str(cfg['qsv_quality']),
+                '-qp_p',str(cfg['qsv_quality']),'-pix_fmt','yuv420p']
     if expected_codec == 'hevc':
         cmd += ['-tag:v', 'hvc1']
     cmd += ['-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', str(temporary)]
@@ -201,7 +229,8 @@ def encode(job):
     cmd[1:1] = ['-progress', str(HOME / 'progress.txt'), '-stats_period', '2']
 
     def limit_resources():
-        os.nice(10)
+        if hasattr(os,'nice'):
+            os.nice(10)
         if hasattr(os, 'sched_getaffinity'):
             allowed = sorted(os.sched_getaffinity(0))[:cfg['cpu_threads']]
             if allowed:
@@ -218,7 +247,7 @@ def encode(job):
         with open(HOME / 'ffmpeg-last.log', 'wb') as errors:
             subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=errors,
-                           preexec_fn=limit_resources, env=environment)
+                           env=environment,**({"preexec_fn":limit_resources} if os.name!="nt" else process_options()))
         duration, output_video, output_audio_count = probe(temporary)
         if output_video['codec_name'] != expected_codec:
             raise ValueError('Output codec verification failed')
@@ -235,11 +264,7 @@ def encode(job):
         with temporary.open('rb') as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
-        directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        sync_directory(destination.parent)
         published_stat = destination.stat()
         with connect() as db:
             db.execute("UPDATE jobs SET status='published',output=?,output_size=?,output_mtime=?,updated=? WHERE id=?",
@@ -265,7 +290,7 @@ def encode(job):
 
 def finish_published(job):
     destination = Path(job['output']).resolve(strict=True)
-    destination.relative_to(ROOT)
+    recording_relative(destination,recording_roots(HOME.parent,ROOT))
     stat = destination.stat()
     if (stat.st_size, stat.st_mtime_ns) != (job['output_size'], job['output_mtime']):
         raise ValueError('Published output changed; originals retained')
@@ -286,7 +311,7 @@ def worker(inherited_fd=None):
     lock = os.fdopen(inherited_fd, 'a') if inherited_fd is not None else open(HOME / 'worker.lock', 'a')
     with lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_lock(lock,blocking=False)
         except BlockingIOError:
             return
         handler = RotatingFileHandler(HOME / 'postprocess.log', maxBytes=1024 * 1024, backupCount=2)

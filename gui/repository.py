@@ -8,6 +8,7 @@ import sqlite3
 import time
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from platform_utils import recording_roots, recording_relative
 from shared import (
     AppError, PROXY_MODES, QUALITIES, RECORD_KEYS, SharedLock, atomic_write,
     canonical_url, clean_label, platform, read_ini, read_json, room_id,
@@ -53,7 +54,7 @@ class QueueRepository:
     def connect(self, write=False):
         if not self.paths.queue.exists():
             raise AppError("转码队列尚未创建。", "not_ready", 503)
-        db = sqlite3.connect(str(self.paths.queue) if write else "file:" + str(self.paths.queue) + "?mode=ro",
+        db = sqlite3.connect(str(self.paths.queue) if write else self.paths.queue.as_uri() + "?mode=ro",
                              timeout=5, uri=not write)
         db.row_factory = sqlite3.Row
         try:
@@ -105,7 +106,7 @@ class QueueRepository:
             row = dict(r)
             source = Path(row["source"])
             try:
-                relative = str(source.relative_to(self.paths.downloads))
+                relative = str(recording_relative(source, recording_roots(self.paths.config,self.paths.downloads)))
             except ValueError:
                 relative = source.name
             items.append({
@@ -142,7 +143,7 @@ class QueueRepository:
                 raise AppError("只能重试失败任务。", "conflict", 409)
             try:
                 source = Path(row["source"]).resolve(strict=True)
-                source.relative_to(self.paths.downloads)
+                recording_relative(source, recording_roots(self.paths.config,self.paths.downloads))
                 stat = source.stat()
             except (OSError, ValueError):
                 raise AppError("原录像不存在，暂时无法重试。", "source_missing", 409)

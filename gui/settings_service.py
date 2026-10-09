@@ -261,7 +261,8 @@ class ConfigService:
             if values["post_format"] == "mp4":
                 h["enabled"] = values["h265"]
             h["qsv_quality"] = values["qsv_quality"]
-            h["encoder"] = "hevc_qsv"
+            h["crf"] = values["qsv_quality"]
+            h.setdefault("encoder", "hevc_qsv")
             self.store.json_write(self.h265, h)
 
     def apply_pending(self):

@@ -36,9 +36,10 @@
         <button class="nav-item" data-page="jobs"><span class="nav-number">02</span>转码队列<span id="nav-jobs" class="nav-count">—</span></button>
         <button class="nav-item" data-page="settings"><span class="nav-number">03</span>录制设置</button>
         <button class="nav-item" data-page="proxy"><span class="nav-number">04</span>代理设置</button>
+        <button class="nav-item" id="desktop-nav" data-page="desktop" hidden><span class="nav-number">05</span>桌面设置</button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small>Intel QSV · 单任务队列</small></div></div>
+        <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small id="engine-description">Intel QSV · 单任务队列</small></div></div>
         <button id="logout" class="text-button">退出登录</button>
         <span class="version">DouyinLiveRecorder-Web 1.0.0 · Core v4.0.7</span>
       </div>
@@ -46,7 +47,7 @@
 
     <main>
       <header class="topbar">
-        <div class="breadcrumb">我的 NAS <span>/</span> 录制管理</div>
+        <div class="breadcrumb"><span id="workspace-name">我的 NAS</span> / 录制管理</div>
         <div class="connection" id="connection"><span class="dot"></span><span>正在连接</span></div>
       </header>
       <div id="environment-banner" class="banner" hidden>本机验证环境 · 尚未连接 NAS，这里的操作不会修改 NAS。</div>
@@ -73,7 +74,7 @@
           <div class="page-heading"><div><span class="eyebrow">ENCODING WORKSPACE</span><h1>转码队列</h1><p class="muted">从录制文件到最终视频，每一步都看得见。</p></div><button id="refresh-jobs" class="secondary">刷新队列</button></div>
           <div id="active-encoding" class="active-encoding" hidden>
             <div><span class="eyebrow">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
-            <div class="progress-area"><div class="progress-label"><span>H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
+            <div class="progress-area"><div class="progress-label"><span id="active-encoder-label">H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
           </div>
           <div class="queue-summary" id="queue-summary"></div>
           <div class="toolbar">
@@ -104,12 +105,40 @@
             </div></div>
             <div class="settings-section"><div><h2>录制完成后的文件</h2><p class="muted">录制结束后自动处理，无需手动操作。</p></div><div class="form-grid">
               <label>录制完成后保存格式<select name="post_format"><option value="mp4">MP4</option><option value="keep">保留录制格式，不自动转换</option></select></label>
-              <label class="switch-row"><span>重新编码为 H.265<small>使用 Intel QSV 核显；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
-              <label>H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span>ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
+              <label class="switch-row"><span>重新编码为 H.265<small>使用当前编码器；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
+              <label>H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span id="quality-unit">ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
               <label class="switch-row"><span>转换成功后删除原文件<small>验证通过才删除；关闭时保留原件。MP4 原件保留时，输出另存为 .H265.mp4。</small></span><input type="checkbox" name="delete_original" role="switch"></label>
             </div></div>
             <p class="field-error" id="settings-error" role="alert"></p>
             <div class="form-footer"><span class="muted">已是 H.265 的视频会保留原编码，避免重复有损处理。</span><button class="primary" type="submit">保存录制设置</button></div>
+          </form>
+        </section>
+
+
+        <section id="page-desktop" class="page" hidden>
+          <div class="page-heading"><div><span class="eyebrow">DESKTOP WORKSPACE</span><h1>桌面设置</h1><p class="muted">选择本机录像目录、编码器与后台运行方式。</p></div><span id="desktop-state" class="pill">读取配置中</span></div>
+          <div class="notice">关闭窗口后，软件默认继续在托盘或菜单栏录制。需要完全退出时，请使用托盘菜单的“退出并保存录像”。</div>
+          <div class="toolbar"><button id="desktop-start" class="secondary">启动采集器</button><button id="desktop-stop" class="secondary">停止并保存录像</button><button id="desktop-recordings" class="secondary">打开录像目录</button><button id="desktop-logs" class="secondary">打开日志目录</button></div>
+          <form id="desktop-form">
+            <div class="settings-section"><div><h2>文件与工具</h2><p class="muted">目录变更只影响以后录制的文件，原录像不会搬移。修改目录或 FFmpeg 前请停止采集器并等待队列处理完成。</p></div><div class="form-grid">
+              <label class="span-two">录像保存目录<div class="path-picker"><input name="downloads" required><button id="choose-downloads" class="secondary" type="button">选择目录</button></div></label>
+              <label class="span-two">FFmpeg 程序路径<div class="path-picker"><input name="ffmpeg" placeholder="留空使用软件附带的 FFmpeg"><button id="choose-ffmpeg" class="secondary" type="button">选择文件</button></div><small id="desktop-tools" class="muted"></small></label>
+              <p class="muted span-two" id="desktop-data-dir"></p>
+            </div></div>
+            <div class="settings-section"><div><h2>H.265 编码</h2><p class="muted">自动检测会优先测试本机硬件编码器。指定编码器失败时保留源录像，不会改用其他编码器。</p></div><div class="form-grid">
+              <label>编码器<select name="encoder"><option value="auto">自动检测硬件，必要时使用 CPU</option></select></label>
+              <button id="test-encoder" type="button" class="secondary">测试当前编码器</button>
+              <label>VideoToolbox 视频码率<div class="unit-input"><input name="bitrate_kbps" type="number" min="500" max="100000" required><span>kbps</span></div><small class="muted">仅用于 Apple VideoToolbox；默认 4000 kbps，数值越大通常质量越高。</small></label>
+              <label>CPU 转码线程数<input name="cpu_threads" type="number" min="1" max="16" required><small class="muted">仅影响 CPU 编码资源上限。其他编码器的质量在“录制设置”中调整。</small></label>
+            </div></div>
+            <div class="settings-section"><div><h2>窗口与后台运行</h2></div><div class="form-grid">
+              <label class="switch-row"><span>打开软件后自动启动采集器</span><input name="auto_start" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>关闭窗口后留在托盘继续录制</span><input name="close_to_tray" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>打开软件时先隐藏窗口</span><input name="start_minimized" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>录制或转码时阻止系统自动睡眠<small>软件保持运行时生效；手动睡眠或合盖仍可能中断任务。</small></span><input name="prevent_sleep" type="checkbox" role="switch"></label>
+            </div></div>
+            <p class="field-error" id="desktop-error" role="alert"></p>
+            <div class="form-footer"><span class="muted">分 P、画质、保存格式与删除原件策略继续使用“录制设置”。</span><button type="submit" class="primary">保存桌面设置</button></div>
           </form>
         </section>
 

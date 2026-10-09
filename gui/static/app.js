@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const ctx = {csrf:null, snapshot:null, page:"live", jobPage:1, jobs:null, revision:null, settingsRevision:null, proxyRevision:null, busy:false};
+const ctx = {csrf:null, snapshot:null, page:"live", jobPage:1, jobs:null, revision:null, settingsRevision:null, proxyRevision:null, busy:false,desktop:false,desktopData:null};
 const statusText = {unknown:"等待检测", checking:"检测中", offline:"等待开播", live:"正在直播",
   recording:"正在录制", disabled:"已暂停", error:"采集异常", queued:"排队中", running:"转码中",
   published:"验证后收尾", done:"已完成", failed:"失败"};
@@ -48,7 +48,7 @@ function elapsed(epoch) {
   return (h ? h+" 小时 " : "")+m+" 分钟";
 }
 function shortTime(epoch) {
-  return epoch ? new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:"Asia/Taipei"}).format(new Date(epoch*1000)) : "—";
+  return epoch ? new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone}).format(new Date(epoch*1000)) : "—";
 }
 function badge(state) {return node("span",statusText[state] || "未知", "status "+(Object.hasOwn(statusText,state) ? state : "unknown"));}
 function toast(message) {
@@ -71,6 +71,10 @@ async function action(buttonElement, fn, errorSelector=null) {
 
 function renderRooms() {
   const data=ctx.snapshot; if(!data) return;
+  const labels={hevc_qsv:"Intel QSV",hevc_videotoolbox:"Apple VideoToolbox",hevc_nvenc:"NVIDIA NVENC",hevc_amf:"AMD AMF",libx265:"CPU"};
+  const encoder=labels[data.encoding?.encoder] || "H.265";
+  setText("#engine-description",encoder+" · 单任务队列");setText("#active-encoder-label","H.265 · "+encoder);
+  renderDesktopStatus(data.desktop);
   setText("#metric-rooms",data.monitoring_count);
   setText("#metric-recording",data.recording_count);
   setText("#metric-queue",data.queue.queued+data.queue.running+(data.queue.published||0));
@@ -192,6 +196,7 @@ async function openPage(page) {
     if(page==="jobs") await loadJobs();
     if(page==="settings") await loadSettings();
     if(page==="proxy") await loadProxy();
+    if(page==="desktop" && ctx.desktop) await loadDesktop();
   }catch(e){globalError(e.message);}
 }
 function openRoom(room=null) {
@@ -215,6 +220,7 @@ async function loadSettings() {
   }
   $("#settings-pending").hidden=!data.pending;
   setText("#settings-state",data.pending ? "有设置等待应用" : "配置已读取");
+  setText("#quality-unit",data.encoder==="libx265"?"CRF":data.encoder==="hevc_qsv"?"ICQ":"质量");
   updateSettingsDependencies();setText("#settings-error","");
 }
 function updateSettingsDependencies() {
@@ -279,12 +285,66 @@ $("#job-filter").addEventListener("change",()=>{ctx.jobPage=1;loadJobs().catch(e
 $("#job-search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{ctx.jobPage=1;loadJobs().catch(e=>globalError(e.message));},350);});
 $("#previous-page").addEventListener("click",()=>{ctx.jobPage--;loadJobs().catch(e=>globalError(e.message));});
 $("#next-page").addEventListener("click",()=>{ctx.jobPage++;loadJobs().catch(e=>globalError(e.message));});
+
+function renderDesktopStatus(status){
+  if(!ctx.desktop || !status)return;
+  setText("#desktop-state",status.stopping ? "正在保存录像" : status.running ? "采集器运行中" : "采集器已停止");
+  $("#desktop-start").disabled=status.running || status.stopping || !status.ffmpeg_ready || !status.node_ready;
+  $("#desktop-stop").disabled=!status.running || status.stopping;
+}
+async function loadDesktop(){
+  const data=await api("/api/desktop");ctx.desktopData=data;
+  const form=$("#desktop-form");
+  const select=form.elements.encoder;select.replaceChildren(node("option","自动检测硬件，必要时使用 CPU"));
+  select.firstChild.value="auto";
+  for(const item of data.encoders){const o=node("option",item.label);o.value=item.value;select.append(o);}
+  if(data.values.encoder!=="auto" && !data.encoders.some(i=>i.value===data.values.encoder)){
+    const o=node("option","当前编码器不可用："+data.values.encoder);o.value=data.values.encoder;select.append(o);
+  }
+  for(const [key,value] of Object.entries(data.values)){
+    const input=form.elements[key];if(!input)continue;
+    if(input.type==="checkbox")input.checked=value;else input.value=value;
+  }
+  setText("#desktop-tools",(data.ffmpeg_path || "未找到 FFmpeg")+" · Node.js "+(data.status.node_ready?"已就绪":"未找到"));
+  setText("#desktop-data-dir","应用数据目录："+data.data_dir);
+  renderDesktopStatus(data.status);setText("#desktop-error","");
+}
+$("#desktop-form").addEventListener("submit",event=>{
+  event.preventDefault();const form=event.currentTarget;
+  action(event.submitter,async()=>{
+    const values={};
+    for(const key of ["downloads","ffmpeg","encoder"])values[key]=form.elements[key].value;
+    for(const key of ["bitrate_kbps","cpu_threads"])values[key]=Number(form.elements[key].value);
+    for(const key of ["auto_start","close_to_tray","start_minimized","prevent_sleep"])values[key]=form.elements[key].checked;
+    const result=await api("/api/desktop",{method:"PUT",body:JSON.stringify({values,revision:ctx.desktopData.revision})});
+    await window.recorderDesktop?.preferencesChanged();toast(result.message);await loadDesktop();await refresh();
+  },"#desktop-error");
+});
+for(const [selector,endpoint] of [["#desktop-start","start"],["#desktop-stop","stop"]])
+  $(selector).addEventListener("click",()=>action($(selector),async()=>{
+    const result=await api("/api/desktop/"+endpoint,{method:"POST",body:"{}"});toast(result.message);await loadDesktop();await refresh();
+  }));
+$("#choose-downloads").addEventListener("click",()=>action($("#choose-downloads"),async()=>{
+  const value=await window.recorderDesktop?.chooseFolder();if(value)$("#desktop-form").elements.downloads.value=value;
+}));
+$("#choose-ffmpeg").addEventListener("click",()=>action($("#choose-ffmpeg"),async()=>{
+  const value=await window.recorderDesktop?.chooseFFmpeg();if(value)$("#desktop-form").elements.ffmpeg.value=value;
+}));
+$("#desktop-recordings").addEventListener("click",()=>window.recorderDesktop?.openRecordings());
+$("#desktop-logs").addEventListener("click",()=>window.recorderDesktop?.openLogs());
+$("#test-encoder").addEventListener("click",()=>action($("#test-encoder"),async()=>{
+  const value=$("#desktop-form").elements.encoder.value;
+  const encoder=value==="auto"?ctx.desktopData.status.encoder:value;
+  const result=await api("/api/desktop/test-encoder",{method:"POST",body:JSON.stringify({encoder})});toast(result.message);
+},"#desktop-error"));
+
 async function initialize(){
   try{
-    const session=await api("/api/session");$("#setup-notice").hidden=!session.setup_required;
+    const session=await api("/api/session");ctx.desktop=!!session.desktop;$("#desktop-nav").hidden=!ctx.desktop;$("#logout").hidden=ctx.desktop;
+    if(ctx.desktop)setText("#workspace-name","我的电脑");$("#setup-notice").hidden=!session.setup_required;
     $("#environment-banner").hidden=session.environment!=="development";
     if(session.authenticated){ctx.csrf=session.csrf;showApp();await refresh();
-      const requested=location.hash.slice(1);await openPage(["live","jobs","settings","proxy"].includes(requested) ? requested : "live");
+      const requested=location.hash.slice(1);await openPage(["live","jobs","settings","proxy",...(ctx.desktop?["desktop"]:[])].includes(requested) ? requested : "live");
     } else showLogin();
   }catch(e){showLogin();setText("#login-error",e.message);}
 }

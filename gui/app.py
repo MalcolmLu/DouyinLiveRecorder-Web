@@ -15,15 +15,16 @@ from settings_service import ConfigService
 from repository import ConfigRepository, QueueRepository
 from services import DashboardService
 from shared import AppError, Paths
+from platform_utils import source_root
 
 LOG = logging.getLogger("recorder_web")
 
 
-def create_app(paths=None, testing=False):
+def create_app(paths=None, testing=False, desktop=None):
     paths = paths or Paths.from_env()
     app = Flask(__name__, static_folder=None)
     app.config.update(TESTING=testing, MAX_CONTENT_LENGTH=32768)
-    secure = not testing and os.environ.get("GUI_ENV") != "development"
+    secure = not testing and desktop is None and os.environ.get("GUI_ENV") != "development"
     auth_repo = AuthRepository(paths.state)
     auth = AuthService(auth_repo)
     config = ConfigService(ConfigRepository(paths))
@@ -31,7 +32,7 @@ def create_app(paths=None, testing=False):
     dashboard = DashboardService(paths, config, queue)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
-    static = Path(__file__).resolve().parent / "static"
+    static = source_root() / "gui/static"
     allowed_hosts = set(filter(None, os.environ.get("GUI_ALLOWED_HOSTS", "").split(",")))
 
     def body():
@@ -43,6 +44,9 @@ def create_app(paths=None, testing=False):
     @app.before_request
     def protect():
         g.request_id = uuid.uuid4().hex[:16]
+        if desktop is not None and not testing:
+            if request.remote_addr!="127.0.0.1" or request.host!=app.config.get("DESKTOP_ALLOWED_HOST"):
+                raise AppError("桌面服务仅允许本机应用访问。","local_only",403)
         if allowed_hosts and request.host not in allowed_hosts and not testing:
             raise AppError("访问主机不在允许列表中。", "invalid_host", 400)
         if secure and not request.is_secure:
@@ -104,7 +108,8 @@ def create_app(paths=None, testing=False):
     @app.get("/api/session")
     def session_info():
         return jsonify(authenticated=bool(g.session), csrf=g.session["csrf"] if g.session else None,
-                       setup_required=not bool(auth_repo.password_hash()),
+                       setup_required=desktop is None and not bool(auth_repo.password_hash()),
+                       desktop=desktop is not None,
                        environment="development" if os.environ.get("GUI_ENV") == "development" else "production")
 
     @app.post("/api/login")
@@ -124,7 +129,33 @@ def create_app(paths=None, testing=False):
 
     @app.get("/api/dashboard")
     def live_dashboard():
-        return jsonify(dashboard.snapshot())
+        snapshot=dashboard.snapshot()
+        snapshot["encoding"]={"encoder":config.settings()["encoder"]}
+        if desktop is not None:snapshot["desktop"]=desktop.status()
+        return jsonify(snapshot)
+
+    if desktop is not None:
+        @app.get("/api/desktop")
+        def desktop_info():
+            return jsonify(desktop.snapshot())
+
+        @app.put("/api/desktop")
+        def desktop_save():
+            return jsonify(desktop.save(body()))
+
+        @app.post("/api/desktop/start")
+        def desktop_start():
+            desktop.start()
+            return jsonify(ok=True,message="采集器已启动。")
+
+        @app.post("/api/desktop/stop")
+        def desktop_stop():
+            desktop.request_stop()
+            return jsonify(ok=True,message="正在停止采集器并保存录像；转码队列继续处理。"),202
+
+        @app.post("/api/desktop/test-encoder")
+        def desktop_encoder():
+            return jsonify(desktop.test_encoder(body().get("encoder")))
 
     @app.get("/api/jobs")
     def jobs():

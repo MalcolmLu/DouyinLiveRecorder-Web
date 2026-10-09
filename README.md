@@ -18,6 +18,10 @@
 
 > 默认配置：每 3600 秒分段、TS 录制、结束后保存 H.265 MP4、成功验证后删除对应 TS。整次直播录制结束或从网页暂停后，分段文件统一进入转码队列；分段期间不会立即转码仍在录制的文件。
 
+## 桌面版
+
+新增 Windows x64 与 macOS Apple Silicon 桌面端，沿用 HTML 控制台，提供本机目录选择、编码器检测、托盘后台录制和睡眠策略。构建与下载方式见 [桌面版说明](docs/DESKTOP.md)。桌面源码位于 desktop/，NAS Docker 部署继续使用下面的流程。
+
 ## 环境要求
 
 - Linux x86_64 / amd64，支持 HEVC 编码的 Intel 核显，Docker Engine 与 Docker Compose v2。

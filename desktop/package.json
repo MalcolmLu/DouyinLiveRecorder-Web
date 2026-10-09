@@ -1,0 +1,72 @@
+{
+  "name": "douyin-live-recorder-desktop",
+  "version": "1.1.0",
+  "description": "DouyinLiveRecorder desktop with HTML console and HEVC recording",
+  "author": "MalcolmLu",
+  "license": "MIT",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "prepare-tools": "node prepare-tools.cjs",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "ffmpeg-static": "5.3.0",
+    "ffprobe-static": "3.1.0"
+  },
+  "build": {
+    "appId": "io.github.malcolmlu.douyinrecorder",
+    "productName": "DouyinLiveRecorder",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "assets/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend-dist/dlr-backend",
+        "to": "backend"
+      },
+      {
+        "from": "tools",
+        "to": "tools"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icon.png",
+      "hardenedRuntime": false,
+      "identity": null
+    },
+    "dmg": {
+      "sign": false
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.png",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": null
+  }
+}

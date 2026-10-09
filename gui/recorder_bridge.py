@@ -13,6 +13,7 @@ from shared import AppError, Paths, canonical_url, read_json, room_id, sanitize_
 from youtube_source import extract_live, with_audio
 from proxy_tunnel import youtube_proxy
 from contextlib import nullcontext
+from platform_utils import source_root
 
 
 def safe_url(value):
@@ -51,7 +52,7 @@ class RecorderBridge:
         self.rooms = {}
         self.active = {}
         self.processor = None
-        script = Path(__file__).resolve().parent.parent / "h265/postprocess.py"
+        script = source_root() / "h265/postprocess.py"
         if script.exists():
             spec = importlib.util.spec_from_file_location("web_h265_processor", script)
             self.processor = importlib.util.module_from_spec(spec)
@@ -83,6 +84,8 @@ class RecorderBridge:
         return result
 
     def current_room_data(self, original):
+        if (self.paths.state/"desktop-stop").exists():
+            raise StopMonitoring()
         with self.config.lock:
             current = next((r for r in self.config.rooms() if r["url"] == safe_url(original[1])), None)
         if not current or not current["enabled"]:
@@ -209,6 +212,11 @@ class RecorderBridge:
                         self.rooms.setdefault(identifier, {}).update(state="recording", checked_at=time.time())
                     states = {key: dict(value) for key, value in self.rooms.items()}
                     idle = not self.active and not self.namespace.get("recording")
+                if (self.paths.state/"desktop-stop").exists():
+                    self.namespace["exit_recording"]=True
+                    if idle:
+                        write_json(self.paths.state/"runtime.json",{"heartbeat":0,"rooms":{},"stopped":True})
+                        os._exit(0)
                 if idle:
                     self.config.apply_pending()
                 write_json(self.paths.state / "runtime.json",
