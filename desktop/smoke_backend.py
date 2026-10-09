@@ -62,6 +62,10 @@ with tempfile.TemporaryDirectory(prefix="dlr-frozen-smoke-") as directory:
                 raise AssertionError("Anonymous desktop access accepted")
             except urllib.error.HTTPError as error:assert error.code==401
             print("PASS frozen desktop backend: session/CSRF, recorder startup and graceful stop, room CRUD, HTML assets, tool discovery")
+        except BaseException:
+            for log in (Path(directory)/"logs").glob("*.log"):
+                print(log.name,log.read_text(errors="replace")[-5000:])
+            raise
         finally:
             if process.poll() is None:
                 process.stdin.write("shutdown\n");process.stdin.flush()

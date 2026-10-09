@@ -12,6 +12,7 @@ command=[sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onedir",
          "--paths",str(ROOT/"scripts"),"--hidden-import","main","--hidden-import","app",
          "--hidden-import","service","--hidden-import","setup","--hidden-import","recorder_bridge",
          "--hidden-import","youtube_source","--hidden-import","proxy_tunnel","--hidden-import","platform_utils",
+         "--hidden-import","h265.postprocess","--hidden-import","logging.handlers",
          "--collect-submodules","yt_dlp"]
 for source,destination in (("main.py","."),("defaults","defaults"),("h265","h265"),
                            ("i18n","i18n"),("src/javascript","src/javascript"),("gui/static","gui/static")):
