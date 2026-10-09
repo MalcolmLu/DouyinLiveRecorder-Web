@@ -31,6 +31,12 @@ async function main(){
       if(version.includes("--enable-nonfree"))throw new Error("Non-redistributable FFmpeg build rejected");
       fs.copyFileSync(source,path.join(tools,name+ext));fs.chmodSync(path.join(tools,name+ext),0o755);
     }
+    const licenses=path.join(tools,"licenses");fs.mkdirSync(licenses,{recursive:true});
+    for(const file of ["ffmpeg.LICENSE","ffmpeg.README"]){
+      const source=path.join(path.dirname(ffmpeg),file);
+      if(fs.existsSync(source))fs.copyFileSync(source,path.join(licenses,file));
+    }
+    fs.copyFileSync(path.join(__dirname,"node_modules/ffprobe-static/LICENSE"),path.join(licenses,"ffprobe-static-LICENSE"));
     fs.writeFileSync(path.join(tools,"THIRD-PARTY-SOURCES.txt"),
       "FFmpeg tools: ffmpeg-static@5.3.0 and ffprobe-static@3.1.0.\n"+
       "Source and binary build scripts: https://github.com/eugeneware/ffmpeg-static/tree/b6.1.1\n"+
@@ -57,8 +63,9 @@ async function main(){
   fs.copyFileSync(path.join(folder,platform==="win"?"node.exe":"bin/node"),path.join(tools,"node"+ext));
   fs.chmodSync(path.join(tools,"node"+ext),0o755);
   fs.copyFileSync(path.join(folder,"LICENSE"),path.join(tools,"NODE-LICENSE"));
-  fs.writeFileSync(path.join(tools,"provenance.json"),JSON.stringify({node:{version:release.version,url,sha256:actual},
-     ffmpeg:{npm:"ffmpeg-static@5.3.0",release:"b6.1.1"},ffprobe:{npm:"ffprobe-static@3.1.0"}},null,2));
+  const media=process.platform==="darwin" ? {homebrew:JSON.parse(fs.readFileSync(path.join(tools,"ffmpeg-provenance.json"),"utf8"))} :
+    {ffmpeg:{npm:"ffmpeg-static@5.3.0",release:"b6.1.1"},ffprobe:{npm:"ffprobe-static@3.1.0"}};
+  fs.writeFileSync(path.join(tools,"provenance.json"),JSON.stringify({node:{version:release.version,url,sha256:actual},...media},null,2));
   fs.rmSync(file);fs.rmSync(extraction,{recursive:true});
   for(const binary of ["ffmpeg","ffprobe","node"])execFileSync(path.join(tools,binary+ext),[binary==="node"?"--version":"-version"],{stdio:"ignore"});
   console.log("Bundled FFmpeg, ffprobe and SHA256-verified Node.js for "+process.platform+"/"+process.arch);

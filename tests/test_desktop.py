@@ -1,5 +1,6 @@
 """Desktop API, portable locks, and saved-path/encoder invariants."""
 import hashlib
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -93,3 +94,19 @@ class DesktopTests(unittest.TestCase):
         with lock:
             with lock:atomic_write(target,'{"saved":true}')
         self.assertEqual(json.loads(target.read_text()),{"saved":True})
+
+    def test_exit_requeues_interrupted_job_and_keeps_historical_failure(self):
+        source=self.paths.downloads/"interrupted.ts"
+        source.parent.mkdir(exist_ok=True);source.write_bytes(b"retained original")
+        with closing(sqlite3.connect(self.paths.queue)) as db,db:
+            db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,source TEXT,size INTEGER,mtime INTEGER,status TEXT,error TEXT,updated REAL)")
+            db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,0)",("a"*64,str(source),source.stat().st_size,source.stat().st_mtime_ns,"running",None))
+            db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,0)",("b"*64,str(source),source.stat().st_size,source.stat().st_mtime_ns,"failed","historical failure"))
+        def interrupted_process(_):
+            with closing(sqlite3.connect(self.paths.queue)) as db,db:
+                db.execute("UPDATE jobs SET status='failed',error='interrupted' WHERE id=?",("a"*64,))
+        with patch.object(self.service,"_terminate",side_effect=interrupted_process):self.service.shutdown()
+        with closing(sqlite3.connect(self.paths.queue)) as db:
+            rows=dict(db.execute("SELECT id,status FROM jobs"))
+        self.assertEqual(rows,{"a"*64:"queued","b"*64:"failed"})
+        self.assertEqual(source.read_bytes(),b"retained original")

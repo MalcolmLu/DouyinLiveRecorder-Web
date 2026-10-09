@@ -134,12 +134,13 @@ class DesktopService:
 
     def _spawn(self,role):
         logdir=self.data/"logs";logdir.mkdir(parents=True,exist_ok=True)
-        log=(logdir/(role+"-desktop.log")).open("ab");self.logs.append(log)
         command=child_command(role,*( ["--worker"] if role=="postprocess" else []))
-        return subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=log,stderr=log,
-                                env=os.environ.copy(),**process_options())
+        with (logdir/(role+"-desktop.log")).open("ab") as log:
+            return subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=log,stderr=log,
+                                    env=os.environ.copy(),**process_options())
 
     def start(self):
+        if self.closed.is_set():raise AppError("软件正在退出，请稍候。","shutting_down",409)
         if self.stopping:raise AppError("采集器正在保存录像，请稍候。","stopping",409)
         with self.mutex:
             if self.status()["running"]:return
@@ -150,6 +151,7 @@ class DesktopService:
 
     def start_worker(self):
         with self.mutex:
+            if self.closed.is_set():return
             if not self.status()["worker_running"] and self.status()["ffmpeg_ready"]:
                 self.worker=self._spawn("postprocess")
 
@@ -184,6 +186,7 @@ class DesktopService:
         except psutil.NoSuchProcess:pass
 
     def save(self,body):
+        if self.closed.is_set():raise AppError("软件正在退出，请稍候。","shutting_down",409)
         if not isinstance(body,dict) or body.get("revision")!=self.revision():
             raise AppError("桌面设置已变化，请刷新后重试。","stale_revision",409)
         values=body.get("values")
@@ -228,5 +231,19 @@ class DesktopService:
         if self.closed.is_set():return
         self.closed.set()
         self.stop()
+        from repository import QueueRepository
+        queue=QueueRepository(self.paths)
+        interrupted=None
+        if self.paths.queue.exists():
+            with queue.connect() as db:
+                interrupted=db.execute("SELECT * FROM jobs WHERE status='running' LIMIT 1").fetchone()
         self._terminate(self.worker);self.worker=None
+        if interrupted:
+            source=Path(interrupted["source"])
+            try:unchanged=(source.stat().st_size,source.stat().st_mtime_ns)==(interrupted["size"],interrupted["mtime"])
+            except OSError:unchanged=False
+            if unchanged:
+                with queue.connect(write=True) as db:
+                    db.execute("UPDATE jobs SET status='queued',error=NULL,updated=? WHERE id=? AND status IN ('running','failed')",
+                               (time.time(),interrupted["id"]))
         for stream in self.logs:stream.close()
