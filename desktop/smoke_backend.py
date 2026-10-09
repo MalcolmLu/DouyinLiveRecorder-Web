@@ -63,6 +63,7 @@ with tempfile.TemporaryDirectory(prefix="dlr-frozen-smoke-") as directory:
             except urllib.error.HTTPError as error:assert error.code==401
             print("PASS frozen desktop backend: session/CSRF, recorder startup and graceful stop, room CRUD, HTML assets, tool discovery")
         except BaseException:
+            print(errorfile.read_text(errors="replace")[-8000:])
             for log in (Path(directory)/"logs").glob("*.log"):
                 print(log.name,log.read_text(errors="replace")[-5000:])
             raise

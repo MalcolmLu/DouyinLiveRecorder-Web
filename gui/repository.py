@@ -81,6 +81,8 @@ class QueueRepository:
         if not self.paths.queue.exists():
             return {"queued": 0, "running": 0, "done": 0, "failed": 0, "saved_bytes": 0}
         with self.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
+                return {"queued":0,"running":0,"done":0,"failed":0,"saved_bytes":0}
             states = {r[0]: r[1] for r in db.execute("SELECT status,count(*) FROM jobs WHERE " + self.visible_jobs(db) + " GROUP BY status")}
             savings = db.execute("SELECT coalesce(sum(size-output_size),0) FROM jobs WHERE status='done' AND output_size>0").fetchone()[0]
         return dict({"queued": 0, "running": 0, "done": 0, "failed": 0}, **states, saved_bytes=savings)
@@ -96,6 +98,8 @@ class QueueRepository:
             conditions.append("source LIKE ? ESCAPE '\\'")
             params.append("%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
         with self.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
+                return {"items":[],"total":0,"page":page,"page_size":page_size}
             where = " WHERE " + " AND ".join([self.visible_jobs(db), *conditions])
             total = db.execute("SELECT count(*) FROM jobs" + where, params).fetchone()[0]
             rows = db.execute("SELECT * FROM jobs" + where +
