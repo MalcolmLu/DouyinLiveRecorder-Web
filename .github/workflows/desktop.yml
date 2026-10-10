@@ -64,10 +64,13 @@ jobs:
       - name: Frozen backend smoke test (macOS)
         if: runner.os == 'macOS'
         run: python desktop/smoke_backend.py desktop/backend-dist/dlr-backend/dlr-backend desktop/tools
-      - name: Real software HEVC pipeline
+      - name: Real segment filenames and software HEVC pipeline
         shell: bash
+        env:
+          PYTHONPATH: gui
         run: |
           export PATH="$PWD/desktop/tools:$PATH"
+          python -m unittest discover -s gui -p "test_segment_names.py" -v
           python h265/selftest.py
       - run: npm run dist -- ${{ matrix.target }} --publish never
         working-directory: desktop

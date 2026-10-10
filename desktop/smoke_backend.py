@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 executable=Path(sys.argv[1]).resolve();tools=Path(sys.argv[2]).resolve()
 with tempfile.TemporaryDirectory(prefix="dlr-frozen-smoke-") as directory:
@@ -53,15 +54,38 @@ with tempfile.TemporaryDirectory(prefix="dlr-frozen-smoke-") as directory:
             room=api("/api/rooms","POST",{"url":"https://www.youtube.com/@DesktopFixture/streams",
                  "name":"桌面接口测试","quality":"原画","proxy":"direct","revision":revision},csrf)
             row=api("/api/dashboard")["rooms"][0];assert row["url"].endswith("/live")
+            # A disposable byte fixture checks the packaged library and HTTP seeking;
+            # video encoding/decoding is covered separately by the real HEVC pipeline.
+            recording=Path(directory)/"recordings/Youtube/桌面接口测试/桌面接口测试_2026-10-11_12-34-56.mp4"
+            recording.parent.mkdir(parents=True)
+            payload=b"0123456789abcdef";recording.write_bytes(payload)
+            library_path="/api/rooms/"+room["id"]+"/recordings"
+            library=api(library_path)
+            assert library["total"]==1 and library["items"][0]["name"]==recording.name
+            media_path=library_path+"/media?"+urllib.parse.urlencode({"path":library["items"][0]["path"]})
+            with urllib.request.urlopen(urllib.request.Request(base+media_path,
+                    headers={"Cookie":cookie,"Range":"bytes=4-7"})) as response:
+                assert response.status==206 and response.read()==payload[4:8]
+                assert response.headers["Content-Range"]=="bytes 4-7/16"
+                assert response.headers.get_content_type()=="video/mp4"
+            with urllib.request.urlopen(urllib.request.Request(base+media_path,method="HEAD",
+                    headers={"Cookie":cookie})) as response:
+                assert response.status==200 and response.headers["Content-Length"]==str(len(payload))
+                assert response.read()==b""
+            try:
+                urllib.request.urlopen(base+media_path)
+                raise AssertionError("Anonymous recording access accepted")
+            except urllib.error.HTTPError as error:assert error.code==401
             api("/api/rooms/"+room["id"],"DELETE",{"revision":api("/api/dashboard")["revision"]},csrf)
             assert api("/api/dashboard")["rooms"]==[]
             with urllib.request.urlopen(base+"/static/app.js") as response:
-                assert "loadDesktop" in response.read().decode()
+                javascript=response.read().decode()
+                assert "loadDesktop" in javascript and "openRecordings" in javascript
             try:
                 urllib.request.urlopen(base+"/api/desktop")
                 raise AssertionError("Anonymous desktop access accepted")
             except urllib.error.HTTPError as error:assert error.code==401
-            print("PASS frozen desktop backend: session/CSRF, recorder startup and graceful stop, room CRUD, HTML assets, tool discovery")
+            print("PASS frozen desktop backend: session/CSRF, recorder startup and graceful stop, room CRUD, authenticated recording library and byte ranges, HTML assets, tool discovery")
         except BaseException:
             print(errorfile.read_text(errors="replace")[-8000:])
             for log in (Path(directory)/"logs").glob("*.log"):

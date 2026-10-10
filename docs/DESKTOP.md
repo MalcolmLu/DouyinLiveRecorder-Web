@@ -9,6 +9,8 @@
 启动软件后会打开控制台，后台仅监听 127.0.0.1 的随机端口。应用主进程创建本地会话，使用隔离的浏览器会话传递 HttpOnly Cookie；网页继续校验会话、CSRF、Origin 和 Host，局域网其他设备无法连接。
 
 - “直播任务”“转码队列”“录制设置”“代理设置”沿用现有界面。
+- 点击直播间名称或“录像文件夹”，可浏览该直播间的录像和子目录，并选择文件播放或下载。播放能力取决于系统与内嵌浏览器支持的编码格式。
+- 新录制的每个分 P 文件以该段实际开始时间命名；转码后保留同一文件名，只更改扩展名。更新软件不会自动重命名已有录像。
 - “桌面设置”可选择录像目录、FFmpeg 路径、编码器、VideoToolbox 码率、CPU 线程数，以及启动、托盘和睡眠策略。
 - 默认关闭窗口后留在 Windows 托盘或 macOS 菜单栏继续录制；点击托盘图标可恢复窗口。Mac 菜单栏入口显示“录播”文字，也可点击或右键 Dock 图标恢复窗口。
 - 使用托盘菜单“退出并保存录像”完全退出。正在录制的文件先结束并保存；队列与可用原件保留，下次启动继续处理。
@@ -51,7 +53,7 @@ npm run dist -- --publish never
 
 开发运行可设置 DLR_PYTHON 指向上述环境的 Python，再运行 npm start。
 
-GitHub Actions 的 Desktop installers 工作流在 Windows 和 macOS 原生构建，并运行冻结后台启动、登录保护、停止采集、直播间增删和真实软件 HEVC 转码检查。输出 Windows NSIS .exe、macOS .dmg 与 .zip，保存在对应工作流的 Artifacts 中。
+GitHub Actions 的 Desktop installers 工作流在 Windows 和 macOS 原生构建，并运行冻结后台启动、登录保护、停止采集、直播间增删、录像目录与 HTTP 分段读取、实际分 P 时间命名和真实软件 HEVC 转码检查。输出 Windows NSIS .exe、macOS .dmg 与 .zip，保存在对应工作流的 Artifacts 中。
 
 安装包当前未使用付费的 Windows 发行签名或 Apple Developer ID 公证。它们是供测试的构建，操作系统可能要求由用户本人确认打开；应用不会绕过系统安全提示。
 
