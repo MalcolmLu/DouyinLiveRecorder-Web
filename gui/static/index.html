@@ -171,6 +171,25 @@
       <div class="dialog-footer"><button type="button" id="cancel-room" class="secondary">取消</button><button type="submit" class="primary" id="save-room">添加并开始监控</button></div>
     </form>
   </dialog>
+  <dialog id="recordings-dialog" aria-labelledby="recordings-title">
+    <div class="dialog-heading"><div><span class="eyebrow">RECORDING LIBRARY</span><h2 id="recordings-title">录像文件夹</h2></div><button id="close-recordings" class="text-button">关闭</button></div>
+    <div class="recordings-layout">
+      <section class="recordings-browser" aria-label="录像文件">
+        <div class="recordings-toolbar"><button id="recordings-up" class="row-button" disabled>上一级</button><button id="recordings-refresh" class="row-button">刷新文件夹</button></div>
+        <nav id="recordings-breadcrumbs" class="recordings-breadcrumbs" aria-label="当前录像目录"></nav>
+        <p id="recordings-error" class="field-error" role="alert"></p>
+        <div id="recordings-list" class="recordings-list"></div>
+        <div class="pagination"><span id="recordings-count" class="muted" role="status"></span><div><button id="recordings-previous" class="row-button" disabled>上一页</button><button id="recordings-next" class="row-button" disabled>下一页</button></div></div>
+      </section>
+      <section class="recordings-preview" aria-label="录像播放器">
+        <h3 id="recording-selected">选择一个录制文件</h3>
+        <div id="recording-player-wrap" hidden><video id="recording-player" controls playsinline preload="metadata"></video></div>
+        <p id="recording-playback-status" class="muted" role="status" aria-live="polite"></p>
+        <a id="recording-download" class="secondary small" hidden>下载此录像</a>
+        <p class="muted recordings-help">点击文件名或“播放”即可观看。浏览器需支持录像的格式与编码；TS、FLV、MKV 或部分 H.265 视频可下载后使用本机播放器打开。录制或转码中的文件可能尚不可播放，完成后请刷新。</p>
+      </section>
+    </div>
+  </dialog>
   <dialog id="error-dialog"><div class="dialog-heading"><h2>任务失败原因</h2><button id="close-error" class="text-button">关闭</button></div><p class="muted">原录像已保留。</p><pre id="error-detail"></pre></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>

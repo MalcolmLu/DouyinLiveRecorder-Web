@@ -1,5 +1,6 @@
 const $ = (s) => document.querySelector(s);
 const ctx = {csrf:null, snapshot:null, page:"live", jobPage:1, jobs:null, revision:null, settingsRevision:null, proxyRevision:null, busy:false,desktop:false,desktopData:null};
+const library = {room:null, folder:"", page:1, data:null, request:0};
 const statusText = {unknown:"等待检测", checking:"检测中", offline:"等待开播", live:"正在直播",
   recording:"正在录制", disabled:"已暂停", error:"采集异常", queued:"排队中", running:"转码中",
   published:"验证后收尾", done:"已完成", failed:"失败"};
@@ -56,7 +57,7 @@ function toast(message) {
   toastTimer=setTimeout(() => {$("#toast").hidden=true;},5000);
 }
 function globalError(message="") {setText("#global-error",message);$("#global-error").hidden=!message;}
-function showLogin() {$("#app-view").hidden=true;$("#login-view").hidden=false;ctx.csrf=null;}
+function showLogin() {closeRecordings();$("#app-view").hidden=true;$("#login-view").hidden=false;ctx.csrf=null;}
 function showApp() {$("#login-view").hidden=true;$("#app-view").hidden=false;}
 function button(text, fn, className="row-button") {
   const b=node("button",text,className);b.type="button";b.addEventListener("click",fn);return b;
@@ -92,14 +93,17 @@ function renderRooms() {
     const main=node("td");const cell=node("div",null,"room-cell");
     const initials={"哔哩哔哩":"B站","虎牙":"虎牙","YouTube":"YT","抖音":"抖音","Twitch":"TW","TikTok":"TK"};
     cell.append(node("span",initials[room.platform] || room.platform.slice(0,2),"platform-avatar"));
-    const title=node("div");title.append(node("div",room.display_name,"cell-title"),node("div",room.platform+" · "+room.url,"cell-subtitle"));
+    const title=node("div"), roomLink=button(room.display_name,()=>openRecordings(room),"cell-title room-open");
+    roomLink.title="打开“"+room.display_name+"”的录像文件夹";
+    roomLink.setAttribute("aria-label",room.display_name+" 的录像文件夹");
+    title.append(roomLink,node("div",room.platform+" · "+room.url,"cell-subtitle"));
     cell.append(title);main.append(cell);tr.append(main);
     const state=node("td");state.append(badge(room.state));if(room.last_error){const sub=node("div","检测失败，稍后自动重试","cell-subtitle");sub.title=room.last_error;state.append(sub);}tr.append(state);
     const route=node("td");route.append(node("span",room.uses_proxy ? "共享代理" : "直连","route-tag"+(room.uses_proxy ? " proxy" : "")));
     if(room.applied_proxy!==null && room.applied_proxy!==undefined && room.applied_proxy!==room.uses_proxy && room.state==="recording") route.append(node("div","下次检测生效","cell-subtitle"));
     tr.append(route,node("td",room.quality),node("td",room.state==="recording" ? elapsed(room.started_at) : "—"));
     const controls=node("td",null,"align-right"), actions=node("div",null,"actions");
-    actions.append(button("编辑",() => openRoom(room)));
+    actions.append(button("录像文件夹",()=>openRecordings(room)),button("编辑",() => openRoom(room)));
     const toggle=button(room.enabled ? "暂停监控" : "恢复监控",() => action(toggle,async() => {
       if(room.state==="recording" && !window.confirm("暂停会结束这个直播间当前的录制，已写入的视频会保留并按设置处理。是否暂停？")) return;
       await api("/api/rooms/"+room.id,{method:"PATCH",body:JSON.stringify({enabled:!room.enabled,revision:ctx.snapshot.revision})});
@@ -113,6 +117,79 @@ function renderRooms() {
     actions.append(toggle,remove);controls.append(actions);tr.append(controls);body.append(tr);
   }
 }
+function stopPlayback() {
+  const player=$("#recording-player");
+  player.pause();player.removeAttribute("src");player.load();
+  $("#recording-player-wrap").hidden=true;$("#recording-download").hidden=true;
+  $("#recording-download").removeAttribute("href");
+  setText("#recording-selected","选择一个录制文件");setText("#recording-playback-status","");
+}
+function closeRecordings() {
+  library.request++;library.room=null;library.data=null;
+  stopPlayback();
+  if($("#recordings-dialog").open) $("#recordings-dialog").close();
+}
+async function openRecordings(room) {
+  stopPlayback();library.room=room;library.folder="";library.page=1;library.data=null;
+  setText("#recordings-title",room.display_name+" · 录像文件夹");
+  if(!$("#recordings-dialog").open) $("#recordings-dialog").showModal();
+  await loadRecordings("",1);
+}
+function mediaURL(file, download=false) {
+  const query=new URLSearchParams({path:file.path});if(download)query.set("download","1");
+  return "/api/rooms/"+encodeURIComponent(library.room.id)+"/recordings/media?"+query;
+}
+async function playRecording(file) {
+  const player=$("#recording-player"), download=$("#recording-download");
+  player.pause();setText("#recording-selected",file.name);setText("#recording-playback-status","正在加载录像…");
+  download.href=mediaURL(file,true);download.hidden=false;
+  $("#recording-player-wrap").hidden=false;player.src=mediaURL(file);player.load();
+  try{await player.play();}
+  catch(e){setText("#recording-playback-status",e.name==="NotAllowedError" ? "录像已加载，请点击播放器的播放按钮。" : "浏览器暂时无法播放。文件可能尚未写入完成，或浏览器不支持此编码；可以下载后使用本机播放器打开。");}
+}
+async function loadRecordings(folder=library.folder,page=library.page) {
+  if(!library.room) return;
+  const request=++library.request, room=library.room;
+  setText("#recordings-error","");setText("#recordings-count","正在读取文件夹…");
+  $("#recordings-refresh").disabled=true;
+  try{
+    let data=await api("/api/rooms/"+encodeURIComponent(room.id)+"/recordings?"+new URLSearchParams({folder,page:String(page)}));
+    const last=Math.max(1,Math.ceil(data.total/data.page_size));
+    if(data.page>last) data=await api("/api/rooms/"+encodeURIComponent(room.id)+"/recordings?"+new URLSearchParams({folder:data.folder,page:String(last)}));
+    if(request!==library.request || room!==library.room) return;
+    if(library.data && data.folder!==library.folder) stopPlayback();
+    library.folder=data.folder;library.page=data.page;library.data=data;
+    const breadcrumbs=$("#recordings-breadcrumbs");breadcrumbs.replaceChildren();
+    for(const crumb of data.breadcrumbs) breadcrumbs.append(button(crumb.name,()=>loadRecordings(crumb.path,1),"text-button"));
+    const list=$("#recordings-list");list.replaceChildren();
+    for(const item of data.items){
+      const row=node("div",null,"recording-file"), details=node("div",null,"recording-file-details");
+      const name=button((item.kind==="folder"?"📁 ":"")+item.name,()=>item.kind==="folder"?loadRecordings(item.path,1):playRecording(item),"recording-file-name");
+      name.title=item.name;details.append(name);
+      details.append(node("small",item.kind==="folder"?"文件夹":item.format+" · "+bytes(item.size)+" · "+new Date(item.modified*1000).toLocaleString("zh-CN"),"muted"));
+      row.append(details,button(item.kind==="folder"?"打开":"播放",()=>item.kind==="folder"?loadRecordings(item.path,1):playRecording(item)));
+      list.append(row);
+    }
+    if(!data.items.length) list.append(node("p","此文件夹暂无录像。直播录制后，可在这里查看和播放。","recordings-empty muted"));
+    setText("#recordings-count",data.total+" 项 · 第 "+data.page+" / "+Math.max(1,Math.ceil(data.total/data.page_size))+" 页");
+    $("#recordings-up").disabled=data.parent===null;
+    $("#recordings-previous").disabled=data.page<=1;
+    $("#recordings-next").disabled=data.page*data.page_size>=data.total;
+  }catch(e){
+    if(request===library.request){setText("#recordings-error",e.message);setText("#recordings-count","读取失败");}
+  }finally{if(request===library.request)$("#recordings-refresh").disabled=false;}
+}
+$("#close-recordings").addEventListener("click",closeRecordings);
+$("#recordings-dialog").addEventListener("cancel",event=>{event.preventDefault();closeRecordings();});
+$("#recordings-dialog").addEventListener("close",()=>{if(library.room)closeRecordings();});
+$("#recordings-refresh").addEventListener("click",()=>loadRecordings());
+$("#recordings-up").addEventListener("click",()=>{if(library.data && library.data.parent!==null)loadRecordings(library.data.parent,1);});
+$("#recordings-previous").addEventListener("click",()=>loadRecordings(library.folder,library.page-1));
+$("#recordings-next").addEventListener("click",()=>loadRecordings(library.folder,library.page+1));
+$("#recording-player").addEventListener("playing",()=>setText("#recording-playback-status","正在播放"));
+$("#recording-player").addEventListener("error",()=>{
+  if(library.room && $("#recording-player").hasAttribute("src"))setText("#recording-playback-status","浏览器无法播放此录像。文件可能尚未写入完成，或浏览器不支持当前格式 / H.265 编码；请下载后使用本机播放器打开。");
+});
 function renderSummary() {
   const q=ctx.snapshot?.queue;if(!q) return;
   const target=$("#queue-summary");target.replaceChildren();

@@ -8,12 +8,13 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 from auth import AuthRepository, AuthService
 from settings_service import ConfigService
 from repository import ConfigRepository, QueueRepository
 from services import DashboardService
+from recordings import RecordingsService
 from shared import AppError, Paths
 from platform_utils import source_root
 
@@ -30,6 +31,7 @@ def create_app(paths=None, testing=False, desktop=None):
     config = ConfigService(ConfigRepository(paths))
     queue = QueueRepository(paths)
     dashboard = DashboardService(paths, config, queue)
+    recordings = RecordingsService(paths, config)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
     static = source_root() / "gui/static"
@@ -70,7 +72,7 @@ def create_app(paths=None, testing=False, desktop=None):
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             "Cache-Control": "no-store",
         })
         LOG.info(json.dumps({"event": "http", "request_id": getattr(g, "request_id", None),
@@ -178,6 +180,20 @@ def create_app(paths=None, testing=False, desktop=None):
     def delete_job_record(identifier):
         queue.delete_record(identifier)
         return jsonify(ok=True, message="转码记录已删除，录像文件已保留。")
+
+    @app.get("/api/rooms/<identifier>/recordings")
+    def room_recordings(identifier):
+        try:
+            page = int(request.args.get("page", "1"))
+        except ValueError:
+            raise AppError("页码不正确。")
+        return jsonify(recordings.list(identifier, request.args.get("folder", ""), page))
+
+    @app.get("/api/rooms/<identifier>/recordings/media")
+    def recording_media(identifier):
+        path, mimetype = recordings.media(identifier, request.args.get("path", ""))
+        return send_file(path, mimetype=mimetype, conditional=True, max_age=0,
+                         as_attachment=request.args.get("download") == "1", download_name=path.name)
 
     @app.post("/api/rooms")
     def create_room():
