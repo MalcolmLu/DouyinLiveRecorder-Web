@@ -114,6 +114,31 @@ class RecordingsTests(unittest.TestCase):
         old_token = next(i["path"] for i in data["items"] if i["path"].startswith("1/"))
         self.assertEqual(self.client.get(self.endpoint, query_string={"folder": old_token}).json["items"][0]["name"], "old.mp4")
 
+    def test_platform_case_aliases_deduplicate_only_the_same_directory(self):
+        url = "https://www.youtube.com/@DesktopFixture/live"
+        (self.paths.config / "URL_config.ini").write_text(url + ",主播: 测试主播\n", encoding="utf-8")
+        folder = self.paths.downloads / "Youtube/测试主播"
+        folder.mkdir(parents=True)
+        (folder / "mine.mp4").write_bytes(b"my recording")
+        alias = self.paths.downloads / "YouTube/测试主播"
+        endpoint = "/api/rooms/" + room_id(url) + "/recordings"
+        if alias.exists() and alias.samefile(folder):
+            # Case-insensitive macOS/Windows volumes must show the actual files.
+            data = self.client.get(endpoint).json
+            self.assertEqual(data["total"], 1)
+            self.assertEqual(data["items"][0]["name"], "mine.mp4")
+            self.assertEqual(data["items"][0]["kind"], "file")
+        else:
+            # Case-sensitive volumes can contain two genuinely different folders.
+            alias.mkdir(parents=True)
+            (alias / "other.mp4").write_bytes(b"another recording")
+            data = self.client.get(endpoint).json
+            self.assertEqual(data["total"], 2)
+            self.assertTrue(all(i["kind"] == "folder" for i in data["items"]))
+            names = [self.client.get(endpoint, query_string={"folder": i["path"]}).json["items"][0]["name"]
+                     for i in data["items"]]
+            self.assertEqual(set(names), {"mine.mp4", "other.mp4"})
+
     def test_shared_platform_folder_filters_media_by_author(self):
         (self.paths.config / "config.ini").write_text("[录制设置]\n保存文件夹是否以作者区分 = 否\n", encoding="utf-8")
         base = self.paths.downloads / "B站直播"

@@ -41,7 +41,7 @@ class RecordingsService:
         platforms = {PLATFORM_FOLDERS.get(room["platform"], room["platform"]), room["platform"], runtime.get("platform", "")}
         platforms = {p for p in platforms if p and p not in (".", "..") and not re.search(r"[/\\\x00-\x1f]", p)}
         roots = recording_roots(self.paths.config, self.paths.downloads)
-        locations = []
+        locations, seen_directories = [], set()
         for index, root in enumerate(roots):
             for platform in sorted(platforms):
                 base = root / platform
@@ -52,8 +52,16 @@ class RecordingsService:
                     resolved = candidate.resolve()
                     if not resolved.is_relative_to(root):
                         continue
-                    if any(location["base"] == resolved for location in locations):
+                    # macOS commonly preserves case in paths while treating
+                    # YouTube and Youtube as the same filesystem directory.
+                    try:
+                        stat = resolved.stat()
+                    except (FileNotFoundError, PermissionError):
                         continue
+                    identity = (stat.st_dev, stat.st_ino) if stat.st_ino else resolved
+                    if identity in seen_directories:
+                        continue
+                    seen_directories.add(identity)
                     locations.append({"root": root, "index": index, "base": resolved,
                                       "prefixes": None if by_author else tuple(n + "_" for n in names)})
         return room, locations

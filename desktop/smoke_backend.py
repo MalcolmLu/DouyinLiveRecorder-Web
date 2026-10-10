@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix="dlr-frozen-smoke-") as directory:
             payload=b"0123456789abcdef";recording.write_bytes(payload)
             library_path="/api/rooms/"+room["id"]+"/recordings"
             library=api(library_path)
-            assert library["total"]==1 and library["items"][0]["name"]==recording.name
+            assert library["total"]==1 and library["items"][0]["name"]==recording.name,library
             media_path=library_path+"/media?"+urllib.parse.urlencode({"path":library["items"][0]["path"]})
             with urllib.request.urlopen(urllib.request.Request(base+media_path,
                     headers={"Cookie":cookie,"Range":"bytes=4-7"})) as response:
