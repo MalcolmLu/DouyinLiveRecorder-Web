@@ -6,11 +6,13 @@ import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 import os
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"gui"))
 from platform_utils import acquire_lock, child_command, process_options, recording_relative, recording_roots, sync_directory
@@ -123,9 +125,65 @@ def probe(file):
     if not videos:
         raise ValueError('No video stream')
     duration = float(info['format']['duration'])
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         raise ValueError('Invalid duration')
     return duration, videos[0], sum(s.get('codec_type') == 'audio' for s in info['streams'])
+
+
+def mapped_packet_counts(file):
+    """Read the entire file, counting the first video and every mapped audio stream."""
+    raw = subprocess.check_output(
+        ['ffprobe', '-v', 'error', '-count_packets', '-show_entries',
+         'stream=codec_type,nb_read_packets', '-of', 'json', str(file)],
+        stderr=subprocess.STDOUT, timeout=1800, **process_options())
+    streams = json.loads(raw).get('streams', [])
+    videos = [s for s in streams if s.get('codec_type') == 'video']
+    if not videos:
+        raise ValueError('Full-file verification found no video stream')
+    counts = [int(s['nb_read_packets']) for s in
+              [videos[0], *[s for s in streams if s.get('codec_type') == 'audio']]]
+    if any(n <= 0 for n in counts):
+        raise ValueError('Full-file verification found an empty stream')
+    return counts
+
+
+def normalized_reference(file):
+    """Apply the encoder's input timestamp handling without encoding or saving media."""
+    command = ['ffmpeg', '-nostdin', '-hide_banner', '-v', 'error',
+               '-threads', '1', '-fflags', '+genpts', '-i', str(file),
+               '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
+               '-fps_mode', 'passthrough', '-progress', 'pipe:1', '-f', 'null', '-']
+    with tempfile.TemporaryFile() as errors:
+        result = subprocess.run(command, check=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=errors,
+                                timeout=1800, **process_options())
+    progress = dict(line.split('=', 1) for line in result.stdout.decode().splitlines() if '=' in line)
+    duration = int(progress.get('out_time_us', progress.get('out_time_ms', '0'))) / 1_000_000
+    frames = int(progress.get('frame', '0'))
+    if progress.get('progress') != 'end' or duration <= 0 or frames <= 0:
+        raise ValueError('Full-file timestamp verification did not finish')
+    return duration, frames
+
+
+def verify_duration(source, output, original_duration, output_duration):
+    tolerance = max(1.0, original_duration * .001)
+    if abs(output_duration - original_duration) <= tolerance:
+        return
+    detail = f'source={original_duration:.3f}s output={output_duration:.3f}s'
+    # MPEG-TS duration is often estimated from the file's ends. A full pass
+    # also applies FFmpeg's discontinuity correction, just as encoding does.
+    try:
+        reference_duration, reference_frames = normalized_reference(source)
+        source_counts = mapped_packet_counts(source)
+        output_counts = mapped_packet_counts(output)
+        if source_counts != output_counts or reference_frames != source_counts[0]:
+            raise ValueError(f'mapped packet counts differ: source={source_counts} output={output_counts}')
+        if abs(output_duration - reference_duration) > max(1.0, reference_duration * .001):
+            raise ValueError(f'normalized source={reference_duration:.3f}s differs from output')
+    except (ValueError, KeyError, subprocess.SubprocessError, OSError) as exc:
+        raise ValueError(f'Output duration verification failed: {detail}; {exc}; original retained') from exc
+    LOG.warning('Duration estimate corrected for %s: %s normalized=%.3fs; all mapped packet counts match %s',
+                source.name, detail, reference_duration, source_counts)
 
 
 def opened_by_ffmpeg(file):
@@ -255,8 +313,7 @@ def encode(job):
             raise ValueError('Output dimensions changed')
         if output_audio_count != audio_count:
             raise ValueError('Audio stream count changed')
-        if abs(duration - original_duration) > max(1.0, original_duration * .001):
-            raise ValueError('Output duration verification failed')
+        verify_duration(source, temporary, original_duration, duration)
         if not unchanged(source, job) or opened_by_ffmpeg(source):
             raise ValueError('Source became active or changed; original retained')
         if destination != source and destination.exists():

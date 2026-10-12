@@ -115,6 +115,40 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
         assert changed.exists() and not changed.with_suffix('.mp4').exists()
     print('PASS changed source is retained')
 
+    # Two TS runs restart their timestamps. The quick duration probe sees only
+    # one run; a complete remux and transcode both recover the full timeline.
+    part = root / 'timestamp-part.ts'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                    '-i', 'testsrc2=size=320x180:rate=15', '-f', 'lavfi',
+                    '-i', 'sine=frequency=440:sample_rate=48000', '-t', '12',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                    '-c:a', 'aac', '-f', 'mpegts', str(part)], check=True)
+    discontinuous = module.ROOT / 'discontinuous.ts'
+    discontinuous.write_bytes(part.read_bytes() * 2)
+    estimated = module.probe(discontinuous)[0]
+    identifier = module.enqueue(discontinuous, False)
+    with module.connect() as db:
+        job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+    module.encode(job)
+    corrected = discontinuous.with_suffix('.mp4')
+    actual = module.probe(corrected)[0]
+    assert abs(actual - estimated) > max(1.0, estimated * .001)
+    assert discontinuous.exists() and actual >= 23.9
+    assert module.mapped_packet_counts(discontinuous) == module.mapped_packet_counts(corrected)
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(corrected),
+                    '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+    print('PASS timestamp-discontinuous TS: estimated %.3fs, verified %.3fs, all video/audio packets preserved' % (estimated, actual))
+
+    truncated = root / 'truncated.mp4'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', str(corrected),
+                    '-t', '8', '-map', '0:v:0', '-map', '0:a?', '-c', 'copy', str(truncated)], check=True)
+    try:
+        module.verify_duration(discontinuous, truncated, estimated, module.probe(truncated)[0])
+        raise AssertionError('Truncated output was accepted')
+    except ValueError as error:
+        assert 'Output duration verification failed' in str(error) and discontinuous.exists()
+    print('PASS full-file verification rejects genuinely truncated output')
+
     if '--hardware' in sys.argv:
         cfg_path = module.HOME / 'settings.json'
         cfg = json.loads(cfg_path.read_text())
