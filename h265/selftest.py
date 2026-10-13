@@ -171,6 +171,37 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
           (tail_tracks[0][2], tail_tracks[1][2]))
 
     if '--hardware' in sys.argv:
+        for initial_format in ('yuv420p', 'yuv420p10le'):
+            parts = []
+            for index, (size, pixel_format) in enumerate([
+                    ('320x180', initial_format), ('640x360', 'yuv420p'),
+                    ('320x180', 'yuv420p10le'), ('320x180', 'yuvj420p')]):
+                part = root / ('changing-%s-%d.ts' % (initial_format, index))
+                subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                                '-i', 'testsrc2=size=%s:rate=15' % size, '-f', 'lavfi',
+                                '-i', 'sine=frequency=440:sample_rate=48000', '-t', '12',
+                                '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                                '-pix_fmt', pixel_format, '-c:a', 'aac',
+                                '-f', 'mpegts', str(part)], check=True)
+                parts.append(part)
+            changing = module.ROOT / ('changing-%s.ts' % initial_format)
+            changing.write_bytes(b''.join(p.read_bytes() for p in parts))
+            identifier = module.enqueue(changing, False)
+            with module.connect() as db:
+                job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+            module.encode(job)
+            converted = changing.with_suffix('.mp4')
+            length, video, audio = module.probe(converted)
+            assert (video['width'], video['height'], video['codec_name']) == (320, 180, 'hevc')
+            assert length >= 47.9 and audio == 1 and changing.exists()
+            assert module.mapped_packet_counts(changing) == module.mapped_packet_counts(converted)
+            expected_depth = 'yuv420p10le' if initial_format == 'yuv420p10le' else 'yuv420p'
+            assert video['pix_fmt'] == expected_depth
+            assert video['color_range'] == 'tv'
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(converted),
+                            '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+            print('PASS QSV mid-stream resolution/pixel-format changes, %s: all frames/audio packets preserved' % initial_format)
+
         cfg_path = module.HOME / 'settings.json'
         cfg = json.loads(cfg_path.read_text())
         cfg['qsv_device'] = '/dev/dri/renderD999999'

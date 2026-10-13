@@ -118,7 +118,7 @@ def ensure_worker():
 def probe(file):
     raw = subprocess.check_output(
         ['ffprobe', '-v', 'error', '-show_entries',
-         'format=duration:stream=codec_type,codec_name,width,height,pix_fmt', '-of', 'json', str(file)],
+         'format=duration:stream=codec_type,codec_name,width,height,pix_fmt,color_range', '-of', 'json', str(file)],
         stderr=subprocess.STDOUT, timeout=120)
     info = json.loads(raw)
     videos = [s for s in info.get('streams', []) if s.get('codec_type') == 'video']
@@ -316,7 +316,12 @@ def encode(job):
     elif mode == 'libx264':
         cmd += ['-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
     elif mode == 'hevc_qsv':
-        cmd += ['-vf', f"format={formats[video['pix_fmt']]},hwupload=extra_hw_frames=64",
+        # Normalize software frames before QSV; let the encoder own GPU uploads.
+        # Reinitializing hwupload creates a new pool the existing encoder cannot use.
+        color_range = 'pc' if video.get('color_range') == 'pc' or video['pix_fmt'] == 'yuvj420p' else 'tv'
+        cmd += ['-noautoscale', '-vf',
+                f"scale=w={video['width']}:h={video['height']}:flags=bicubic:out_range={color_range},"
+                f"format={formats[video['pix_fmt']]}",
                 '-preset', cfg['qsv_preset'], '-global_quality', str(cfg['qsv_quality']),
                 '-look_ahead', '0', '-async_depth', '4']
     elif mode == 'hevc_videotoolbox':
