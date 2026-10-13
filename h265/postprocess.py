@@ -148,7 +148,7 @@ def mapped_packet_counts(file):
 
 
 def normalized_reference(file):
-    """Apply the encoder's input timestamp handling without encoding or saving media."""
+    """Read the full input; null-muxer progress is a preliminary timeline estimate."""
     command = ['ffmpeg', '-nostdin', '-hide_banner', '-v', 'error',
                '-threads', '1', '-fflags', '+genpts', '-i', str(file),
                '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
@@ -165,6 +165,56 @@ def normalized_reference(file):
     return duration, frames
 
 
+def mapped_stream_timings(file):
+    """Read MP4 track lengths, including audio that outlasts the final video packet."""
+    raw = subprocess.check_output(
+        ['ffprobe', '-v', 'error', '-show_entries',
+         'format=duration:stream=codec_type,start_time,duration', '-of', 'json', str(file)],
+        stderr=subprocess.STDOUT, timeout=120, **process_options())
+    info = json.loads(raw)
+    streams = info.get('streams', [])
+    videos = [s for s in streams if s.get('codec_type') == 'video']
+    if not videos:
+        raise ValueError('MP4 reference has no video stream')
+    duration = float(info['format']['duration'])
+    tracks = [(s['codec_type'], float(s['start_time']), float(s['duration']))
+              for s in [videos[0], *[s for s in streams if s.get('codec_type') == 'audio']]]
+    if not math.isfinite(duration) or duration <= 0 or any(
+            not math.isfinite(start) or not math.isfinite(length) or length <= 0
+            for _, start, length in tracks):
+        raise ValueError('MP4 reference has invalid track timing')
+    return duration, tracks
+
+
+def verify_mp4_timeline(source, output, source_counts, output_duration):
+    # A null muxer reports the last packet's clock, whereas MP4 uses every
+    # track's duration. Compare like containers without re-encoding the source.
+    with tempfile.TemporaryDirectory(prefix='dlr-duration-reference-') as directory:
+        reference = Path(directory) / 'reference.mp4'
+        command = ['ffmpeg', '-nostdin', '-hide_banner', '-v', 'error', '-n',
+                   '-threads', '1', '-fflags', '+genpts', '-i', str(source),
+                   '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
+                   '-fps_mode', 'passthrough', '-avoid_negative_ts', 'make_zero', str(reference)]
+        with tempfile.TemporaryFile() as errors:
+            subprocess.run(command, check=True, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=errors,
+                           timeout=1800, **process_options())
+        if mapped_packet_counts(reference) != source_counts:
+            raise ValueError('MP4 reference did not preserve every mapped packet')
+        reference_duration, reference_tracks = mapped_stream_timings(reference)
+        _, output_tracks = mapped_stream_timings(output)
+        if abs(output_duration - reference_duration) > max(1.0, reference_duration * .001):
+            raise ValueError(f'MP4 reference={reference_duration:.3f}s differs from output')
+        if len(reference_tracks) != len(output_tracks):
+            raise ValueError('MP4 reference track count differs from output')
+        for index, (expected, actual) in enumerate(zip(reference_tracks, output_tracks)):
+            kind, start, duration = expected
+            tolerance = max(1.0, duration * .001)
+            if actual[0] != kind or abs(actual[1] - start) > 1.0 or abs(actual[2] - duration) > tolerance:
+                raise ValueError(f'MP4 reference {kind} track {index} timing differs from output')
+        return reference_duration
+
+
 def verify_duration(source, output, original_duration, output_duration):
     tolerance = max(1.0, original_duration * .001)
     if abs(output_duration - original_duration) <= tolerance:
@@ -179,7 +229,7 @@ def verify_duration(source, output, original_duration, output_duration):
         if source_counts != output_counts or reference_frames != source_counts[0]:
             raise ValueError(f'mapped packet counts differ: source={source_counts} output={output_counts}')
         if abs(output_duration - reference_duration) > max(1.0, reference_duration * .001):
-            raise ValueError(f'normalized source={reference_duration:.3f}s differs from output')
+            reference_duration = verify_mp4_timeline(source, output, source_counts, output_duration)
     except (ValueError, KeyError, subprocess.SubprocessError, OSError) as exc:
         raise ValueError(f'Output duration verification failed: {detail}; {exc}; original retained') from exc
     LOG.warning('Duration estimate corrected for %s: %s normalized=%.3fs; all mapped packet counts match %s',

@@ -149,6 +149,27 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
         assert 'Output duration verification failed' in str(error) and discontinuous.exists()
     print('PASS full-file verification rejects genuinely truncated output')
 
+    # A longer audio track must be compared independently of the video track.
+    audio_tail = module.ROOT / 'audio-tail.ts'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                    '-i', 'testsrc2=size=320x180:rate=15:duration=12', '-f', 'lavfi',
+                    '-i', 'sine=frequency=660:sample_rate=44100:duration=15',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                    '-c:a', 'aac', '-f', 'mpegts', str(audio_tail)], check=True)
+    identifier = module.enqueue(audio_tail, False)
+    with module.connect() as db:
+        job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+    module.encode(job)
+    tail_output = audio_tail.with_suffix('.mp4')
+    tail_duration, tail_tracks = module.mapped_stream_timings(tail_output)
+    assert tail_tracks[1][2] > tail_tracks[0][2] + 1
+    assert module.mapped_packet_counts(audio_tail) == module.mapped_packet_counts(tail_output)
+    module.verify_mp4_timeline(audio_tail, tail_output, module.mapped_packet_counts(audio_tail), tail_duration)
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(tail_output),
+                    '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+    print('PASS AAC tail preserved: video %.3fs, audio %.3fs; per-track MP4 reference validated' %
+          (tail_tracks[0][2], tail_tracks[1][2]))
+
     if '--hardware' in sys.argv:
         cfg_path = module.HOME / 'settings.json'
         cfg = json.loads(cfg_path.read_text())
