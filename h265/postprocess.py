@@ -197,8 +197,10 @@ def normalized_reference(file):
                                 timeout=1800, **process_options())
     progress = dict(line.split('=', 1) for line in result.stdout.decode().splitlines() if '=' in line)
     duration = int(progress.get('out_time_us', progress.get('out_time_ms', '0'))) / 1_000_000
-    frames = int(progress.get('frame', '0'))
-    if progress.get('progress') != 'end' or duration <= 0 or frames <= 0:
+    # FFmpeg 6.1 omits frame progress for stream-copy outputs (no video filter).
+    # A missing counter requires the full MP4 reference check below.
+    frames = int(progress['frame']) if 'frame' in progress else None
+    if progress.get('progress') != 'end' or duration <= 0 or (frames is not None and frames <= 0):
         raise ValueError('Full-file timestamp verification did not finish')
     return duration, frames
 
@@ -264,9 +266,9 @@ def verify_duration(source, output, original_duration, output_duration):
         reference_duration, reference_frames = normalized_reference(source)
         source_counts = mapped_packet_counts(source)
         output_counts = mapped_packet_counts(output)
-        if source_counts != output_counts or reference_frames != source_counts[0]:
+        if source_counts != output_counts or (reference_frames is not None and reference_frames != source_counts[0]):
             raise ValueError(f'mapped packet counts differ: source={source_counts} output={output_counts}')
-        if abs(output_duration - reference_duration) > max(1.0, reference_duration * .001):
+        if reference_frames is None or abs(output_duration - reference_duration) > max(1.0, reference_duration * .001):
             reference_duration = verify_mp4_timeline(source, output, source_counts, output_duration)
     except (ValueError, KeyError, subprocess.SubprocessError, OSError) as exc:
         raise ValueError(f'Output duration verification failed: {detail}; {exc}; original retained') from exc
