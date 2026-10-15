@@ -2,7 +2,7 @@
 import configparser
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
+from platform_utils import acquire_lock, release_lock, sync_directory
 import hashlib
 import json
 import os
@@ -51,7 +51,7 @@ class SharedLock:
             if not depth:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 self.local.file = self.path.open("a")
-                fcntl.flock(self.local.file, fcntl.LOCK_EX)
+                acquire_lock(self.local.file)
             self.local.depth = depth + 1
         except BaseException:
             self.mutex.release()
@@ -61,7 +61,7 @@ class SharedLock:
     def __exit__(self, *args):
         self.local.depth -= 1
         if not self.local.depth:
-            fcntl.flock(self.local.file, fcntl.LOCK_UN)
+            release_lock(self.local.file)
             self.local.file.close()
         self.mutex.release()
 
@@ -80,16 +80,12 @@ def atomic_write(path, value, mode=0o600):
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
-            os.fchmod(stream.fileno(), mode)
+            os.chmod(temporary, mode)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

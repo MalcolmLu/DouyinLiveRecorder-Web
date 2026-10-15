@@ -13,7 +13,7 @@ def init_gettext(locale_dir, locale_name):
     return gettext.gettext
 
 
-execute_dir = os.path.split(os.path.realpath(sys.argv[0]))[0]
+execute_dir = str(Path(__file__).resolve().parent)
 if os.path.exists(Path(execute_dir) / '_internal/i18n'):
     locale_path = Path(execute_dir) / '_internal/i18n'
 else:

@@ -10,16 +10,18 @@
   <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <section class="login-shell" id="login-view" hidden>
+  <section class="login-shell" id="login-view" {% if authenticated %}hidden{% endif %}>
     <div class="login-brand"><span class="brand-mark">R</span><span>录播控制台</span></div>
     <div class="login-panel">
       <span class="eyebrow">PRIVATE RECORDING CONSOLE</span>
       <h1>让每一次直播，<br>都有迹可循。</h1>
       <p class="muted">登录后管理直播录制、自动转码与代理。</p>
-      <form id="login-form">
+      <form id="login-form" action="/login" method="post" autocomplete="on">
+        <label for="login-username">管理账号</label>
+        <input id="login-username" name="username" type="text" value="admin" autocomplete="username" readonly spellcheck="false" autocapitalize="none">
         <label for="login-password">网页管理密码</label>
         <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="512">
-        <p class="field-error" id="login-error" role="alert"></p>
+        <p class="field-error" id="login-error" role="alert">{{ login_error | default('') }}</p>
         <button class="primary full" type="submit">登录控制台</button>
       </form>
       <div id="setup-notice" class="notice" hidden>尚未设置网页管理密码。请在 NAS 的网页管理容器控制台运行 <code>python /app/gui/manage.py set-password</code>，自行输入两次密码后刷新页面。</div>
@@ -36,17 +38,18 @@
         <button class="nav-item" data-page="jobs"><span class="nav-number">02</span>转码队列<span id="nav-jobs" class="nav-count">—</span></button>
         <button class="nav-item" data-page="settings"><span class="nav-number">03</span>录制设置</button>
         <button class="nav-item" data-page="proxy"><span class="nav-number">04</span>代理设置</button>
+        <button class="nav-item" id="desktop-nav" data-page="desktop" hidden><span class="nav-number">05</span>桌面设置</button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="engine-note"><span class="dot"></span><div>H.265 硬件转码<small>Intel QSV · 单任务队列</small></div></div>
+        <div class="engine-note"><span class="dot"></span><div><span id="engine-title">H.265 硬件转码</span><small id="engine-description">Intel QSV · 单任务队列</small></div></div>
         <button id="logout" class="text-button">退出登录</button>
-        <span class="version">DouyinLiveRecorder-Web 1.0.0 · Core v4.0.7</span>
+        <span class="version" id="app-version">DouyinLiveRecorder-Web 1.1.2 · Core v4.0.7</span>
       </div>
     </aside>
 
     <main>
       <header class="topbar">
-        <div class="breadcrumb">我的 NAS <span>/</span> 录制管理</div>
+        <div class="breadcrumb"><span id="workspace-name">我的 NAS</span> / 录制管理</div>
         <div class="connection" id="connection"><span class="dot"></span><span>正在连接</span></div>
       </header>
       <div id="environment-banner" class="banner" hidden>本机验证环境 · 尚未连接 NAS，这里的操作不会修改 NAS。</div>
@@ -71,24 +74,37 @@
 
         <section id="page-jobs" class="page" hidden>
           <div class="page-heading"><div><span class="eyebrow">ENCODING WORKSPACE</span><h1>转码队列</h1><p class="muted">从录制文件到最终视频，每一步都看得见。</p></div><button id="refresh-jobs" class="secondary">刷新队列</button></div>
+          <div class="queue-controls">
+            <div class="queue-control-status"><strong id="queue-control-state" role="status" aria-live="polite">读取转码状态中</strong><p id="queue-control-detail" class="muted">暂停保留进度；停止保留未完成任务的原录像。</p></div>
+            <div class="queue-control-buttons"><button id="queue-pause" class="secondary small" type="button" disabled>暂停转码</button><button id="queue-resume" class="primary small" type="button" disabled>继续转码</button><button id="queue-stop" class="secondary small danger-button" type="button" disabled>停止转码</button></div>
+          </div>
           <div id="active-encoding" class="active-encoding" hidden>
-            <div><span class="eyebrow">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
-            <div class="progress-area"><div class="progress-label"><span>H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
+            <div><span class="eyebrow" id="active-phase">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
+            <div class="progress-area"><div class="progress-label"><span id="active-encoder-label">H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
           </div>
           <div class="queue-summary" id="queue-summary"></div>
+          <div class="queue-sort">
+            <label for="queue-sort">等待任务排序</label><select id="queue-sort"><option value="oldest">入队时间：从早到晚</option><option value="newest">入队时间：从晚到早</option><option value="smallest">文件大小：从小到大</option><option value="largest">文件大小：从大到小</option><option value="name">文件名：A → Z</option></select><button id="queue-apply-sort" class="secondary small" type="button" disabled>应用顺序</button><small class="muted">作用于全部等待任务；也可逐项置顶、上移或下移。</small>
+          </div>
           <div class="toolbar">
             <label class="sr-only" for="job-filter">任务状态</label>
-            <select id="job-filter"><option value="all">全部任务</option><option value="running">处理中</option><option value="queued">排队中</option><option value="failed">失败</option><option value="done">已完成</option></select>
+            <select id="job-filter"><option value="all">全部任务</option><option value="running">处理中</option><option value="queued">排队中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="done">已完成</option></select>
             <label class="sr-only" for="job-search">搜索文件名</label>
             <input id="job-search" type="search" placeholder="搜索文件名" maxlength="100">
             <span class="muted" id="jobs-total">—</span>
           </div>
+          <div class="queue-bulk" id="queue-bulk">
+            <span id="job-selection-count" role="status" aria-live="polite">已选择 0 条</span>
+            <button id="delete-selected-jobs" class="secondary small" type="button" disabled>删除所选记录</button>
+            <button id="clear-job-selection" class="text-button" type="button" disabled>取消选择</button>
+            <small class="muted">仅删除记录，录像文件保留。全选范围为当前页已完成、失败或已停止的任务。</small>
+          </div>
           <div id="jobs-empty" class="empty-state" hidden><h3>这里还没有任务</h3><p>录制完成的视频会自动进入队列，也可以调整上方的筛选条件。</p></div>
           <div class="table-wrap" id="job-table-wrap">
-            <table><thead><tr><th>录像文件</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
+            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成、失败或已停止的记录"></th><th>录像文件 / 转码顺序</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
           </div>
           <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
-          <p class="muted footnote">删除记录会保留原录像和转码后的视频；排队中或处理中的任务结束后才能删除。失败任务可查看原因并重试，文件已变化或同名输出已存在时会阻止覆盖。</p>
+          <p class="muted footnote">排序会改变实际转码顺序，正在处理的任务不换位。暂停后可继续当前进度；停止会中止当前任务并暂停队列，已停止的任务可重新排队，从头转码。删除记录会保留录像文件。</p>
         </section>
 
         <section id="page-settings" class="page" hidden>
@@ -104,12 +120,40 @@
             </div></div>
             <div class="settings-section"><div><h2>录制完成后的文件</h2><p class="muted">录制结束后自动处理，无需手动操作。</p></div><div class="form-grid">
               <label>录制完成后保存格式<select name="post_format"><option value="mp4">MP4</option><option value="keep">保留录制格式，不自动转换</option></select></label>
-              <label class="switch-row"><span>重新编码为 H.265<small>使用 Intel QSV 核显；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
-              <label>H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span>ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
+              <label class="switch-row"><span>重新编码为 H.265<small>使用当前编码器；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
+              <label id="h265-quality-setting">H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span id="quality-unit">ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
               <label class="switch-row"><span>转换成功后删除原文件<small>验证通过才删除；关闭时保留原件。MP4 原件保留时，输出另存为 .H265.mp4。</small></span><input type="checkbox" name="delete_original" role="switch"></label>
             </div></div>
             <p class="field-error" id="settings-error" role="alert"></p>
             <div class="form-footer"><span class="muted">已是 H.265 的视频会保留原编码，避免重复有损处理。</span><button class="primary" type="submit">保存录制设置</button></div>
+          </form>
+        </section>
+
+
+        <section id="page-desktop" class="page" hidden>
+          <div class="page-heading"><div><span class="eyebrow">DESKTOP WORKSPACE</span><h1>桌面设置</h1><p class="muted">选择本机录像目录、编码器与后台运行方式。</p></div><span id="desktop-state" class="pill">读取配置中</span></div>
+          <div class="notice">关闭窗口后，软件默认继续在 Windows 托盘或 Mac 菜单栏“录播”入口中运行。Mac 也可点击 Dock 图标恢复窗口。需要完全退出时，请使用托盘菜单的“退出并保存录像”。</div>
+          <div class="toolbar"><button id="desktop-start" class="secondary">启动采集器</button><button id="desktop-stop" class="secondary">停止并保存录像</button><button id="desktop-recordings" class="secondary">打开录像目录</button><button id="desktop-logs" class="secondary">打开日志目录</button></div>
+          <form id="desktop-form">
+            <div class="settings-section"><div><h2>文件与工具</h2><p class="muted">目录变更只影响以后录制的文件，原录像不会搬移。修改目录或 FFmpeg 前请停止采集器并等待队列处理完成。</p></div><div class="form-grid">
+              <label class="span-two">录像保存目录<div class="path-picker"><input name="downloads" required><button id="choose-downloads" class="secondary" type="button">选择目录</button></div></label>
+              <label class="span-two">FFmpeg 程序路径<div class="path-picker"><input name="ffmpeg" placeholder="留空使用软件附带的 FFmpeg"><button id="choose-ffmpeg" class="secondary" type="button">选择文件</button></div><small id="desktop-tools" class="muted"></small></label>
+              <p class="muted span-two" id="desktop-data-dir"></p>
+            </div></div>
+            <div class="settings-section"><div><h2>H.265 编码</h2><p class="muted">自动检测会优先测试本机硬件编码器。指定编码器失败时保留源录像，不会改用其他编码器。</p></div><div class="form-grid">
+              <label>编码器<select name="encoder"><option value="auto">自动检测硬件，必要时使用 CPU</option></select></label>
+              <button id="test-encoder" type="button" class="secondary">测试当前编码器</button>
+              <label id="videotoolbox-bitrate">VideoToolbox 视频码率<div class="unit-input"><input name="bitrate_kbps" type="number" min="500" max="100000" required><span>kbps</span></div><small class="muted">仅用于 Apple VideoToolbox；默认 4000 kbps，数值越大通常质量越高。</small></label>
+              <label>CPU 转码线程数<input name="cpu_threads" type="number" min="1" max="16" required><small class="muted">仅影响 CPU 编码资源上限。其他编码器的质量在“录制设置”中调整。</small></label>
+            </div></div>
+            <div class="settings-section"><div><h2>窗口与后台运行</h2></div><div class="form-grid">
+              <label class="switch-row"><span>打开软件后自动启动采集器</span><input name="auto_start" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>关闭窗口后留在托盘继续录制</span><input name="close_to_tray" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>打开软件时先隐藏窗口</span><input name="start_minimized" type="checkbox" role="switch"></label>
+              <label class="switch-row"><span>录制或转码时阻止系统自动睡眠<small>软件保持运行时生效；手动睡眠或合盖仍可能中断任务。</small></span><input name="prevent_sleep" type="checkbox" role="switch"></label>
+            </div></div>
+            <p class="field-error" id="desktop-error" role="alert"></p>
+            <div class="form-footer"><span class="muted">分 P、画质、保存格式与删除原件策略继续使用“录制设置”。</span><button type="submit" class="primary">保存桌面设置</button></div>
           </form>
         </section>
 
@@ -141,6 +185,25 @@
       <p class="field-error" id="room-error" role="alert"></p>
       <div class="dialog-footer"><button type="button" id="cancel-room" class="secondary">取消</button><button type="submit" class="primary" id="save-room">添加并开始监控</button></div>
     </form>
+  </dialog>
+  <dialog id="recordings-dialog" aria-labelledby="recordings-title">
+    <div class="dialog-heading"><div><span class="eyebrow">RECORDING LIBRARY</span><h2 id="recordings-title">录像文件夹</h2></div><button id="close-recordings" class="text-button">关闭</button></div>
+    <div class="recordings-layout">
+      <section class="recordings-browser" aria-label="录像文件">
+        <div class="recordings-toolbar"><button id="recordings-up" class="row-button" disabled>上一级</button><button id="recordings-refresh" class="row-button">刷新文件夹</button></div>
+        <nav id="recordings-breadcrumbs" class="recordings-breadcrumbs" aria-label="当前录像目录"></nav>
+        <p id="recordings-error" class="field-error" role="alert"></p>
+        <div id="recordings-list" class="recordings-list"></div>
+        <div class="pagination"><span id="recordings-count" class="muted" role="status"></span><div><button id="recordings-previous" class="row-button" disabled>上一页</button><button id="recordings-next" class="row-button" disabled>下一页</button></div></div>
+      </section>
+      <section class="recordings-preview" aria-label="录像播放器">
+        <h3 id="recording-selected">选择一个录制文件</h3>
+        <div id="recording-player-wrap" hidden><video id="recording-player" controls playsinline preload="metadata"></video></div>
+        <p id="recording-playback-status" class="muted" role="status" aria-live="polite"></p>
+        <a id="recording-download" class="secondary small" hidden>下载此录像</a>
+        <p class="muted recordings-help">点击文件名或“播放”即可观看。浏览器需支持录像的格式与编码；TS、FLV、MKV 或部分 H.265 视频可下载后使用本机播放器打开。录制或转码中的文件可能尚不可播放，完成后请刷新。</p>
+      </section>
+    </div>
   </dialog>
   <dialog id="error-dialog"><div class="dialog-heading"><h2>任务失败原因</h2><button id="close-error" class="text-button">关闭</button></div><p class="muted">原录像已保留。</p><pre id="error-detail"></pre></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

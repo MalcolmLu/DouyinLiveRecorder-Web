@@ -1,0 +1,5 @@
+-r ../requirements.txt
+-r ../gui/requirements.txt
+-r ../gui/requirements-youtube.txt
+waitress==3.0.2
+pyinstaller==6.22.3

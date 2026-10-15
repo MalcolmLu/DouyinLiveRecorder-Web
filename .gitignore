@@ -33,3 +33,9 @@ venv/
 *.mkv
 *.flv
 # Keep defaults and source; do not put live configs in these directories.
+node_modules/
+desktop/tools/
+desktop/backend-dist/
+desktop/build/
+desktop/dist/
+*.spec

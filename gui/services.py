@@ -58,7 +58,7 @@ class DashboardService:
             room["display_name"] = state.get("name") or room["name"]
         summary = self.queue.summary()
         return {
-            "rooms": rooms, "revision": revision, "queue": summary,
+            "rooms": rooms, "revision": revision, "queue": summary, "queue_control": self.queue.control(),
             "recorder": {"connected": connected, "heartbeat": heartbeat,
                          "version": runtime.get("version", "v4.0.7"), "proxy_ready": proxy_ready},
             "recording_count": sum(r["state"] == "recording" for r in rooms),

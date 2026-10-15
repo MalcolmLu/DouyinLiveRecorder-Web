@@ -1,7 +1,9 @@
 """Integration tests run only against isolated temporary configuration and media."""
 import ast
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import hashlib
+from html.parser import HTMLParser
 import json
 import logging
 from pathlib import Path
@@ -33,6 +35,20 @@ unrelated = preserve-this-value
 
 
 class ConsoleTests(unittest.TestCase):
+    def add_queue_job(self, identifier, status):
+        source = self.paths.downloads / (identifier[:8] + ".ts")
+        source.write_bytes(b"isolated second recording")
+        output = source.with_suffix(".mp4")
+        if status == "done":
+            output.write_bytes(b"isolated encoded recording")
+        stat = source.stat()
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
+            db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (identifier, str(source), stat.st_size, stat.st_mtime_ns, 1, 0,
+                        status, None, str(output) if output.exists() else None,
+                        output.stat().st_size if output.exists() else None, None, time.time(), time.time()))
+        return source, output
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="recorder-web-test-")
         root = Path(self.temp.name).resolve()
@@ -79,6 +95,57 @@ class ConsoleTests(unittest.TestCase):
         for _ in range(8):
             self.assertEqual(self.client.post("/api/login", json={"password": "wrong"}).status_code, 401)
         self.assertEqual(self.client.post("/api/login", json={"password": "wrong"}).status_code, 429)
+
+    def test_native_login_form_metadata_redirect_and_session(self):
+        class Elements(HTMLParser):
+            def __init__(self, html):
+                super().__init__(); self.elements = {}; self.feed(html)
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if "id" in attrs:
+                    self.elements[attrs["id"]] = (tag, attrs)
+        browser = self.app.test_client()
+        page = browser.get("/")
+        self.assertEqual(page.headers["Referrer-Policy"], "same-origin")
+        html = page.get_data(as_text=True)
+        elements = Elements(html).elements
+        form = elements["login-form"][1]
+        self.assertEqual((form["method"], form["action"], form["autocomplete"]), ("post", "/login", "on"))
+        self.assertNotIn("hidden", elements["login-view"][1])
+        self.assertEqual(elements["login-username"][1]["autocomplete"], "username")
+        self.assertEqual(elements["login-username"][1]["value"], "admin")
+        self.assertEqual(elements["login-password"][1]["autocomplete"], "current-password")
+        self.assertNotIn("value", elements["login-password"][1])
+        result = browser.post("/login", data={"username": "admin", "password": "Local-Test-Password-42"},
+                              headers={"Origin": "http://localhost"})
+        self.assertEqual((result.status_code, result.headers["Location"]), (303, "/"))
+        cookie = result.headers["Set-Cookie"]
+        self.assertIn("HttpOnly", cookie); self.assertIn("SameSite=Strict", cookie)
+        self.assertNotIn("Local-Test-Password-42", cookie)
+        session = browser.get("/api/session").json
+        self.assertTrue(session["authenticated"])
+        self.assertEqual(browser.post("/api/jobs/delete-records", json={"ids": [self.job_id]},
+                                      headers={"X-CSRF-Token": session["csrf"]}).status_code, 200)
+
+    def test_native_login_error_stays_html_without_echoing_password(self):
+        browser = self.app.test_client()
+        result = browser.post("/login", data={"password": "<script>wrong-password</script>"})
+        self.assertEqual(result.status_code, 401)
+        self.assertEqual(result.mimetype, "text/html")
+        self.assertNotIn("<script>wrong-password</script>", result.get_data(as_text=True))
+        self.assertIn('id="login-error"', result.get_data(as_text=True))
+        self.assertFalse(browser.get("/api/session").json["authenticated"])
+        self.assertEqual(browser.post("/login", data={"password": "Local-Test-Password-42"},
+                                      headers={"Origin": "https://other.example"}).status_code, 403)
+        self.assertEqual(browser.post("/login", data={"password": "Local-Test-Password-42"},
+                                      headers={"Origin": "null"}).status_code, 403)
+
+    def test_native_login_shares_existing_rate_limit(self):
+        for _ in range(8):
+            self.client.post("/api/login", json={"password": "wrong"})
+        result = self.app.test_client().post("/login", data={"password": "Local-Test-Password-42"})
+        self.assertEqual(result.status_code, 429)
+        self.assertEqual(result.mimetype, "text/html")
 
     def test_proxy_secrets_are_not_returned_and_blank_preserves(self):
         initial = self.client.get("/api/proxy")
@@ -244,7 +311,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/jobs?status=failed&search=fixture").json["total"], 0)
         self.assertEqual(self.client.get("/api/dashboard").json["queue"]["failed"], 0)
         self.assertEqual(self.client.post(path + "/retry", json={}, headers=self.headers).status_code, 404)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (self.job_id,)).fetchone()
             self.assertIsNotNone(row)
             db.execute("INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
@@ -255,14 +322,14 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual((source.read_bytes(), output.read_bytes()), original)
 
     def test_delete_completed_job_keeps_saved_space_and_active_tasks_visible(self):
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             db.execute("UPDATE jobs SET status='done',size=100,output_size=40")
         path = "/api/jobs/" + self.job_id
         self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 200)
         queue = self.client.get("/api/dashboard").json["queue"]
         self.assertEqual((queue["done"], queue["saved_bytes"]), (0, 60))
         for status in ("queued", "running", "published"):
-            with sqlite3.connect(self.paths.queue) as db:
+            with closing(sqlite3.connect(self.paths.queue)) as db, db:
                 db.execute("UPDATE jobs SET status=?", (status,))
             self.assertEqual(self.client.get("/api/jobs").json["items"][0]["status"], status)
             self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 409)
@@ -276,10 +343,10 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.client.delete("/api/jobs/invalid", headers=self.headers).status_code, 422)
         self.assertEqual(self.client.delete("/api/jobs/" + "b"*64, headers=self.headers).status_code, 404)
         self.assertEqual(self.client.get("/api/jobs").json["total"], 1)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='deleted_jobs'").fetchone())
         self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 200)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             self.assertEqual(db.execute("SELECT count(*) FROM deleted_jobs").fetchone()[0], 1)
 
     def test_delete_and_retry_serialize_without_hidden_active_work(self):
@@ -295,9 +362,61 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(results.count(200), 1)
         self.assertIn(next(code for code in results if code != 200), (404, 409))
         data = queue.jobs("all", "", 1)
-        with sqlite3.connect(self.paths.queue) as db:
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
             status = db.execute("SELECT status FROM jobs WHERE id=?", (self.job_id,)).fetchone()[0]
         self.assertEqual(data["total"], 1 if status == "queued" else 0)
+
+    def test_bulk_delete_preserves_media_and_fingerprints_and_is_idempotent(self):
+        second = "b" * 64
+        source, output = self.add_queue_job(second, "done")
+        files = [self.paths.downloads / "fixture.ts", source, output]
+        before = [(file.read_bytes(), file.stat().st_mtime_ns) for file in files]
+        result = self.client.post("/api/jobs/delete-records", json={"ids": [self.job_id, second, second]}, headers=self.headers)
+        self.assertEqual((result.status_code, result.json["deleted"]), (200, 2))
+        self.assertEqual(self.client.get("/api/jobs").json["total"], 0)
+        self.assertEqual([(file.read_bytes(), file.stat().st_mtime_ns) for file in files], before)
+        with closing(sqlite3.connect(self.paths.queue)) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT count(*) FROM deleted_jobs").fetchone()[0], 2)
+        self.assertEqual(self.client.post("/api/jobs/delete-records", json={"ids": [self.job_id, second]}, headers=self.headers).status_code, 200)
+
+    def test_bulk_delete_validates_every_record_before_mutating(self):
+        second = "b" * 64
+        self.add_queue_job(second, "running")
+        for status in ("running", "queued", "published"):
+            with closing(sqlite3.connect(self.paths.queue)) as db, db:
+                db.execute("UPDATE jobs SET status=? WHERE id=?", (status, second))
+            result = self.client.post("/api/jobs/delete-records", json={"ids": [self.job_id, second]}, headers=self.headers)
+            self.assertEqual(result.status_code, 409)
+            self.assertEqual(self.client.get("/api/jobs").json["total"], 2)
+        result = self.client.post("/api/jobs/delete-records", json={"ids": [self.job_id, "c" * 64]}, headers=self.headers)
+        self.assertEqual(result.status_code, 404)
+        with closing(sqlite3.connect(self.paths.queue)) as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='deleted_jobs'").fetchone())
+
+    def test_bulk_delete_auth_csrf_and_input_limits(self):
+        path = "/api/jobs/delete-records"
+        self.assertEqual(self.app.test_client().post(path, json={"ids": [self.job_id]}).status_code, 401)
+        self.assertEqual(self.client.post(path, json={"ids": [self.job_id]}).status_code, 403)
+        self.assertEqual(self.client.post(path, json={"ids": [self.job_id]}, headers=dict(self.headers, Origin="https://other.example")).status_code, 403)
+        for identifiers in (None, {}, [], ["invalid"], [self.job_id, 17], [self.job_id] * 201):
+            self.assertEqual(self.client.post(path, json={"ids": identifiers}, headers=self.headers).status_code, 422)
+        self.assertEqual(self.client.get("/api/jobs").json["total"], 1)
+
+    def test_bulk_delete_and_retry_are_serialized_without_partial_deletion(self):
+        second = "b" * 64
+        self.add_queue_job(second, "done")
+        queue = self.parts["queue"]
+        def attempt(operation):
+            try:
+                operation(); return 200
+            except AppError as error:
+                return error.status
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, [lambda: queue.delete_records([self.job_id, second]), lambda: queue.retry(self.job_id)]))
+        self.assertEqual(results.count(200), 1)
+        visible = queue.jobs("all", "", 1)["total"]
+        self.assertEqual(visible, 0 if results[0] == 200 else 2)
 
     def test_status_unknown_without_heartbeat_and_inherited_proxy(self):
         data = self.client.get("/api/dashboard").json

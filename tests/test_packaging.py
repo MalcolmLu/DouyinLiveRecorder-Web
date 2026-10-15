@@ -3,6 +3,7 @@ import ast
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -70,6 +71,7 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(all(not value for _,value in config.items("Cookie")))
         self.assertTrue(all(not value for _,value in config.items("Authorization")))
 
+    @unittest.skipIf(os.name=="nt","NAS certificate setup is tested on POSIX hosts")
     def test_certificate_creation_preserves_existing_key_pair(self):
         with tempfile.TemporaryDirectory(prefix="dlr-certificate-test-") as name:
             state = Path(name)

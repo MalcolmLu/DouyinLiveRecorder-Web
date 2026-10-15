@@ -13,6 +13,8 @@ from shared import AppError, Paths, canonical_url, read_json, room_id, sanitize_
 from youtube_source import extract_live, with_audio
 from proxy_tunnel import youtube_proxy
 from contextlib import nullcontext
+from segment_names import timestamp_segments, pattern_directory, filename_matcher
+from platform_utils import source_root
 
 
 def safe_url(value):
@@ -51,7 +53,7 @@ class RecorderBridge:
         self.rooms = {}
         self.active = {}
         self.processor = None
-        script = Path(__file__).resolve().parent.parent / "h265/postprocess.py"
+        script = source_root() / "h265/postprocess.py"
         if script.exists():
             spec = importlib.util.spec_from_file_location("web_h265_processor", script)
             self.processor = importlib.util.module_from_spec(spec)
@@ -83,6 +85,8 @@ class RecorderBridge:
         return result
 
     def current_room_data(self, original):
+        if (self.paths.state/"desktop-stop").exists():
+            raise StopMonitoring()
         with self.config.lock:
             current = next((r for r in self.config.rooms() if r["url"] == safe_url(original[1])), None)
         if not current or not current["enabled"]:
@@ -99,22 +103,26 @@ class RecorderBridge:
         self.local.youtube_audio = result.get("audio_url")
         return result
 
-    def source_files(self, pattern):
-        path = Path(pattern)
-        directory = path.parent.resolve()
+    def source_files(self, pattern, since=0):
+        directory = pattern_directory(pattern)
         directory.relative_to(self.paths.downloads)
-        expression = re.escape(path.name)
-        expression = re.sub(r"%0?\d*d", lambda _: r"\d+", expression)
-        match = re.compile(expression).fullmatch
-        return sorted(p for p in directory.iterdir() if p.is_file() and match(p.name)
-                      and p.suffix.lower() in (".ts", ".mkv", ".mp4", ".flv") and not p.name.startswith("."))
+        match = filename_matcher(pattern)
+        files = []
+        for path in directory.iterdir():
+            try:
+                if (path.is_file() and match(path.name) and not path.name.startswith(".")
+                        and path.suffix.lower() in (".ts", ".mkv", ".mp4", ".flv")
+                        and path.stat().st_mtime >= since):
+                    files.append(path)
+            except FileNotFoundError:
+                continue
+        return sorted(files)
 
     def policy(self, source):
         with self.mutex:
             for entry in self.active.values():
-                if Path(source).parent == Path(entry["pattern"]).parent:
-                    prefix = Path(entry["pattern"]).stem.split("%")[0]
-                    if Path(source).name.startswith(prefix):
+                if Path(source).parent.resolve() == pattern_directory(entry["pattern"]):
+                    if filename_matcher(entry["pattern"])(Path(source).name):
                         return entry["policy"]
         section = self.config._section()
         return {"convert": section.get("录制完成后自动转为mp4格式", "是") == "是",
@@ -176,19 +184,21 @@ class RecorderBridge:
             audio = getattr(self.local, "youtube_audio", None)
             if audio:
                 ffmpeg_command = with_audio(ffmpeg_command, audio)
+            ffmpeg_command = timestamp_segments(ffmpeg_command)
+            started = time.time()
             policy = {"convert": bool(self.namespace.get("converts_to_mp4", True)),
                       "delete": bool(self.namespace.get("delete_origin_file", True))}
             with self.mutex:
                 self.active[room_id(safe_url(record_url))] = {"pattern": ffmpeg_command[-1], "policy": policy}
             self.event(record_url, "recording", name=re.sub(r"^序号\d+\s*", "", record_name),
-                       started_at=time.time(), file=Path(ffmpeg_command[-1]).name)
+                       started_at=started, file=Path(ffmpeg_command[-1]).name)
             try:
                 is_youtube = "youtube.com/" in record_url or "youtu.be/" in record_url
                 tunnel = youtube_proxy(ffmpeg_command) if is_youtube else nullcontext(ffmpeg_command)
                 with tunnel as command:
                     result = original(record_name, record_url, command, save_type, *args, **kwargs)
                 if policy["convert"] and save_type.upper() in ("TS", "MKV", "MP4"):
-                    for source in self.source_files(ffmpeg_command[-1]):
+                    for source in self.source_files(ffmpeg_command[-1], since=started):
                         self.dispatch_single(source, policy=policy)
                 self.event(record_url, "checking", force=True, started_at=None, file=None)
                 return result
@@ -209,6 +219,11 @@ class RecorderBridge:
                         self.rooms.setdefault(identifier, {}).update(state="recording", checked_at=time.time())
                     states = {key: dict(value) for key, value in self.rooms.items()}
                     idle = not self.active and not self.namespace.get("recording")
+                if (self.paths.state/"desktop-stop").exists():
+                    self.namespace["exit_recording"]=True
+                    if idle:
+                        write_json(self.paths.state/"runtime.json",{"heartbeat":0,"rooms":{},"stopped":True})
+                        os._exit(0)
                 if idle:
                     self.config.apply_pending()
                 write_json(self.paths.state / "runtime.json",

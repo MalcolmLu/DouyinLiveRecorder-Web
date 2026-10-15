@@ -1,0 +1,85 @@
+name: Desktop installers
+
+on:
+  push:
+    branches: [main, codex/desktop-clients]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            target: --win --x64
+          - os: macos-15
+            name: macos-arm64
+            target: --mac --arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: "1"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: python -m pip install -r desktop/requirements.txt
+      - run: python -m unittest discover -s gui -p "test_*.py" -v
+        env:
+          PYTHONPATH: gui
+      - run: python -m unittest discover -s tests -v
+        env:
+          PYTHONPATH: gui
+      - run: npm ci --no-audit --no-fund
+        working-directory: desktop
+      - run: node --test test_renderer.cjs
+        working-directory: desktop
+      - run: node --check main.cjs
+        working-directory: desktop
+      - run: npm run prepare-tools
+        working-directory: desktop
+      - run: python desktop/build_backend.py
+      - name: Frozen backend smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: python desktop/smoke_backend.py desktop/backend-dist/dlr-backend/dlr-backend.exe desktop/tools
+      - name: Frozen backend smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: python desktop/smoke_backend.py desktop/backend-dist/dlr-backend/dlr-backend desktop/tools
+      - name: Real segment filenames and software HEVC pipeline
+        shell: bash
+        env:
+          PYTHONPATH: gui
+        run: |
+          export PATH="$PWD/desktop/tools:$PATH"
+          python -m unittest discover -s gui -p "test_segment_names.py" -v
+          python h265/selftest.py
+      - run: npm run dist -- ${{ matrix.target }} --publish never
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder-${{ matrix.name }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+          if-no-files-found: error
+          retention-days: 30

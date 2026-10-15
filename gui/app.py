@@ -8,30 +8,33 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 from auth import AuthRepository, AuthService
 from settings_service import ConfigService
 from repository import ConfigRepository, QueueRepository
 from services import DashboardService
+from recordings import RecordingsService
 from shared import AppError, Paths
+from platform_utils import source_root
 
 LOG = logging.getLogger("recorder_web")
 
 
-def create_app(paths=None, testing=False):
+def create_app(paths=None, testing=False, desktop=None):
     paths = paths or Paths.from_env()
-    app = Flask(__name__, static_folder=None)
+    static = source_root() / "gui/static"
+    app = Flask(__name__, static_folder=None, template_folder=str(static))
     app.config.update(TESTING=testing, MAX_CONTENT_LENGTH=32768)
-    secure = not testing and os.environ.get("GUI_ENV") != "development"
+    secure = not testing and desktop is None and os.environ.get("GUI_ENV") != "development"
     auth_repo = AuthRepository(paths.state)
     auth = AuthService(auth_repo)
     config = ConfigService(ConfigRepository(paths))
     queue = QueueRepository(paths)
     dashboard = DashboardService(paths, config, queue)
+    recordings = RecordingsService(paths, config)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
-    static = Path(__file__).resolve().parent / "static"
     allowed_hosts = set(filter(None, os.environ.get("GUI_ALLOWED_HOSTS", "").split(",")))
 
     def body():
@@ -43,6 +46,9 @@ def create_app(paths=None, testing=False):
     @app.before_request
     def protect():
         g.request_id = uuid.uuid4().hex[:16]
+        if desktop is not None and not testing:
+            if request.remote_addr!="127.0.0.1" or request.host!=app.config.get("DESKTOP_ALLOWED_HOST"):
+                raise AppError("桌面服务仅允许本机应用访问。","local_only",403)
         if allowed_hosts and request.host not in allowed_hosts and not testing:
             raise AppError("访问主机不在允许列表中。", "invalid_host", 400)
         if secure and not request.is_secure:
@@ -65,8 +71,10 @@ def create_app(paths=None, testing=False):
             "X-Request-ID": getattr(g, "request_id", ""),
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
-            "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            # Native same-origin form POSTs need a non-null Origin header.
+            # Cross-origin navigation still sends no Referer.
+            "Referrer-Policy": "same-origin",
+            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             "Cache-Control": "no-store",
         })
         LOG.info(json.dumps({"event": "http", "request_id": getattr(g, "request_id", None),
@@ -86,7 +94,7 @@ def create_app(paths=None, testing=False):
 
     @app.get("/")
     def index():
-        return send_from_directory(static, "index.html")
+        return render_template("index.html", authenticated=bool(g.session))
 
     @app.get("/static/<path:name>")
     def assets(name):
@@ -104,13 +112,27 @@ def create_app(paths=None, testing=False):
     @app.get("/api/session")
     def session_info():
         return jsonify(authenticated=bool(g.session), csrf=g.session["csrf"] if g.session else None,
-                       setup_required=not bool(auth_repo.password_hash()),
+                       setup_required=desktop is None and not bool(auth_repo.password_hash()),
+                       desktop=desktop is not None,
                        environment="development" if os.environ.get("GUI_ENV") == "development" else "production")
 
     @app.post("/api/login")
     def login():
         token, csrf = auth.login(body().get("password"), request.remote_addr or "unknown")
         response = jsonify(authenticated=True, csrf=csrf)
+        response.set_cookie("recorder_session", token, httponly=True, secure=secure,
+                            samesite="Strict", max_age=86400, path="/")
+        return response
+
+    @app.post("/login")
+    def browser_login():
+        # A native POST followed by navigation lets password managers recognize
+        # successful sign-in without JavaScript clearing the password first.
+        try:
+            token, _ = auth.login(request.form.get("password"), request.remote_addr or "unknown")
+        except AppError as exc:
+            return render_template("index.html", authenticated=False, login_error=exc.message), exc.status
+        response = redirect("/", code=303)
         response.set_cookie("recorder_session", token, httponly=True, secure=secure,
                             samesite="Strict", max_age=86400, path="/")
         return response
@@ -124,7 +146,33 @@ def create_app(paths=None, testing=False):
 
     @app.get("/api/dashboard")
     def live_dashboard():
-        return jsonify(dashboard.snapshot())
+        snapshot=dashboard.snapshot()
+        snapshot["encoding"]={"encoder":config.settings()["encoder"]}
+        if desktop is not None:snapshot["desktop"]=desktop.status()
+        return jsonify(snapshot)
+
+    if desktop is not None:
+        @app.get("/api/desktop")
+        def desktop_info():
+            return jsonify(desktop.snapshot())
+
+        @app.put("/api/desktop")
+        def desktop_save():
+            return jsonify(desktop.save(body()))
+
+        @app.post("/api/desktop/start")
+        def desktop_start():
+            desktop.start()
+            return jsonify(ok=True,message="采集器已启动。")
+
+        @app.post("/api/desktop/stop")
+        def desktop_stop():
+            desktop.request_stop()
+            return jsonify(ok=True,message="正在停止采集器并保存录像；转码队列继续处理。"),202
+
+        @app.post("/api/desktop/test-encoder")
+        def desktop_encoder():
+            return jsonify(desktop.test_encoder(body().get("encoder")))
 
     @app.get("/api/jobs")
     def jobs():
@@ -134,9 +182,28 @@ def create_app(paths=None, testing=False):
             page = int(request.args.get("page", "1"))
         except ValueError:
             raise AppError("页码不正确。")
-        if status not in ("all", "queued", "running", "published", "done", "failed") or len(search) > 100 or not 1 <= page <= 10000:
+        if status not in ("all", "queued", "running", "published", "done", "failed", "stopped") or len(search) > 100 or not 1 <= page <= 10000:
             raise AppError("筛选条件不正确。")
         return jsonify(queue.jobs(status, search, page))
+
+    @app.post("/api/queue/control")
+    def control_queue():
+        data = body()
+        state = queue.change_control(data.get("action"), data.get("revision"), data.get("current_job_id"))
+        return jsonify(ok=True, control=state, message="转码控制指令已提交。")
+
+    @app.post("/api/queue/order")
+    def order_queue():
+        data = body()
+        if "sort" in data:
+            if "job_id" in data or "move" in data or data["sort"] is None:
+                raise AppError("请只选择一种排序操作。")
+            state = queue.reorder(data.get("revision"), sort=data["sort"])
+        else:
+            if not isinstance(data.get("job_id"), str):
+                raise AppError("请选择等待转码的任务。")
+            state = queue.reorder(data.get("revision"), identifier=data["job_id"], direction=data.get("move"))
+        return jsonify(ok=True, control=state, message="等待任务的实际转码顺序已更新。")
 
     @app.post("/api/jobs/<identifier>/retry")
     def retry(identifier):
@@ -147,6 +214,25 @@ def create_app(paths=None, testing=False):
     def delete_job_record(identifier):
         queue.delete_record(identifier)
         return jsonify(ok=True, message="转码记录已删除，录像文件已保留。")
+
+    @app.post("/api/jobs/delete-records")
+    def delete_job_records():
+        count = queue.delete_records(body().get("ids"))
+        return jsonify(ok=True, deleted=count, message=f"已删除 {count} 条转码记录，录像文件已保留。")
+
+    @app.get("/api/rooms/<identifier>/recordings")
+    def room_recordings(identifier):
+        try:
+            page = int(request.args.get("page", "1"))
+        except ValueError:
+            raise AppError("页码不正确。")
+        return jsonify(recordings.list(identifier, request.args.get("folder", ""), page))
+
+    @app.get("/api/rooms/<identifier>/recordings/media")
+    def recording_media(identifier):
+        path, mimetype = recordings.media(identifier, request.args.get("path", ""))
+        return send_file(path, mimetype=mimetype, conditional=True, max_age=0,
+                         as_attachment=request.args.get("download") == "1", download_name=path.name)
 
     @app.post("/api/rooms")
     def create_room():
