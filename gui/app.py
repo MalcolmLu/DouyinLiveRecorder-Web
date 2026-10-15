@@ -71,7 +71,9 @@ def create_app(paths=None, testing=False, desktop=None):
             "X-Request-ID": getattr(g, "request_id", ""),
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
-            "Referrer-Policy": "no-referrer",
+            # Native same-origin form POSTs need a non-null Origin header.
+            # Cross-origin navigation still sends no Referer.
+            "Referrer-Policy": "same-origin",
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             "Cache-Control": "no-store",
         })

@@ -105,7 +105,9 @@ class ConsoleTests(unittest.TestCase):
                 if "id" in attrs:
                     self.elements[attrs["id"]] = (tag, attrs)
         browser = self.app.test_client()
-        html = browser.get("/").get_data(as_text=True)
+        page = browser.get("/")
+        self.assertEqual(page.headers["Referrer-Policy"], "same-origin")
+        html = page.get_data(as_text=True)
         elements = Elements(html).elements
         form = elements["login-form"][1]
         self.assertEqual((form["method"], form["action"], form["autocomplete"]), ("post", "/login", "on"))
