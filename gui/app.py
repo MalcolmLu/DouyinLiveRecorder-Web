@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from flask import Flask, g, jsonify, request, send_file, send_from_directory
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 from auth import AuthRepository, AuthService
 from settings_service import ConfigService
@@ -23,7 +23,8 @@ LOG = logging.getLogger("recorder_web")
 
 def create_app(paths=None, testing=False, desktop=None):
     paths = paths or Paths.from_env()
-    app = Flask(__name__, static_folder=None)
+    static = source_root() / "gui/static"
+    app = Flask(__name__, static_folder=None, template_folder=str(static))
     app.config.update(TESTING=testing, MAX_CONTENT_LENGTH=32768)
     secure = not testing and desktop is None and os.environ.get("GUI_ENV") != "development"
     auth_repo = AuthRepository(paths.state)
@@ -34,7 +35,6 @@ def create_app(paths=None, testing=False, desktop=None):
     recordings = RecordingsService(paths, config)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
-    static = source_root() / "gui/static"
     allowed_hosts = set(filter(None, os.environ.get("GUI_ALLOWED_HOSTS", "").split(",")))
 
     def body():
@@ -92,7 +92,7 @@ def create_app(paths=None, testing=False, desktop=None):
 
     @app.get("/")
     def index():
-        return send_from_directory(static, "index.html")
+        return render_template("index.html", authenticated=bool(g.session))
 
     @app.get("/static/<path:name>")
     def assets(name):
@@ -118,6 +118,19 @@ def create_app(paths=None, testing=False, desktop=None):
     def login():
         token, csrf = auth.login(body().get("password"), request.remote_addr or "unknown")
         response = jsonify(authenticated=True, csrf=csrf)
+        response.set_cookie("recorder_session", token, httponly=True, secure=secure,
+                            samesite="Strict", max_age=86400, path="/")
+        return response
+
+    @app.post("/login")
+    def browser_login():
+        # A native POST followed by navigation lets password managers recognize
+        # successful sign-in without JavaScript clearing the password first.
+        try:
+            token, _ = auth.login(request.form.get("password"), request.remote_addr or "unknown")
+        except AppError as exc:
+            return render_template("index.html", authenticated=False, login_error=exc.message), exc.status
+        response = redirect("/", code=303)
         response.set_cookie("recorder_session", token, httponly=True, secure=secure,
                             samesite="Strict", max_age=86400, path="/")
         return response
@@ -180,6 +193,11 @@ def create_app(paths=None, testing=False, desktop=None):
     def delete_job_record(identifier):
         queue.delete_record(identifier)
         return jsonify(ok=True, message="转码记录已删除，录像文件已保留。")
+
+    @app.post("/api/jobs/delete-records")
+    def delete_job_records():
+        count = queue.delete_records(body().get("ids"))
+        return jsonify(ok=True, deleted=count, message=f"已删除 {count} 条转码记录，录像文件已保留。")
 
     @app.get("/api/rooms/<identifier>/recordings")
     def room_recordings(identifier):

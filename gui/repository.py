@@ -122,17 +122,26 @@ class QueueRepository:
         return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     def delete_record(self, identifier):
-        if not re.fullmatch(r"[0-9a-f]{64}", identifier):
-            raise AppError("任务编号不正确。")
+        self.delete_records([identifier])
+
+    def delete_records(self, identifiers):
+        if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 200 or any(
+                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in identifiers):
+            raise AppError("请选择 1 至 200 条有效的任务记录。")
+        identifiers = list(dict.fromkeys(identifiers))
         with self.connect(write=True) as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM jobs WHERE id=?", (identifier,)).fetchone()
-            if not row:
+            placeholders = ",".join("?" for _ in identifiers)
+            rows = db.execute("SELECT status FROM jobs WHERE id IN (" + placeholders + ")", identifiers).fetchall()
+            if len(rows) != len(identifiers):
                 raise AppError("找不到这个任务。", "not_found", 404)
-            if row["status"] not in ("done", "failed"):
+            if any(row["status"] not in ("done", "failed") for row in rows):
                 raise AppError("排队中或处理中的任务暂不能删除，请等待任务结束。", "conflict", 409)
             self.migrate_deleted_jobs(db)
-            db.execute("INSERT OR IGNORE INTO deleted_jobs(id,deleted_at) VALUES(?,?)", (identifier, time.time()))
+            deleted_at = time.time()
+            db.executemany("INSERT OR IGNORE INTO deleted_jobs(id,deleted_at) VALUES(?,?)",
+                           [(identifier, deleted_at) for identifier in identifiers])
+        return len(identifiers)
 
     def retry(self, identifier):
         if not re.fullmatch(r"[0-9a-f]{64}", identifier):

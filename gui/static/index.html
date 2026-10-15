@@ -10,16 +10,18 @@
   <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <section class="login-shell" id="login-view" hidden>
+  <section class="login-shell" id="login-view" {% if authenticated %}hidden{% endif %}>
     <div class="login-brand"><span class="brand-mark">R</span><span>录播控制台</span></div>
     <div class="login-panel">
       <span class="eyebrow">PRIVATE RECORDING CONSOLE</span>
       <h1>让每一次直播，<br>都有迹可循。</h1>
       <p class="muted">登录后管理直播录制、自动转码与代理。</p>
-      <form id="login-form">
+      <form id="login-form" action="/login" method="post" autocomplete="on">
+        <label for="login-username">管理账号</label>
+        <input id="login-username" name="username" type="text" value="admin" autocomplete="username" readonly spellcheck="false" autocapitalize="none">
         <label for="login-password">网页管理密码</label>
         <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="512">
-        <p class="field-error" id="login-error" role="alert"></p>
+        <p class="field-error" id="login-error" role="alert">{{ login_error | default('') }}</p>
         <button class="primary full" type="submit">登录控制台</button>
       </form>
       <div id="setup-notice" class="notice" hidden>尚未设置网页管理密码。请在 NAS 的网页管理容器控制台运行 <code>python /app/gui/manage.py set-password</code>，自行输入两次密码后刷新页面。</div>
@@ -84,9 +86,15 @@
             <input id="job-search" type="search" placeholder="搜索文件名" maxlength="100">
             <span class="muted" id="jobs-total">—</span>
           </div>
+          <div class="queue-bulk" id="queue-bulk">
+            <span id="job-selection-count" role="status" aria-live="polite">已选择 0 条</span>
+            <button id="delete-selected-jobs" class="secondary small" type="button" disabled>删除所选记录</button>
+            <button id="clear-job-selection" class="text-button" type="button" disabled>取消选择</button>
+            <small class="muted">仅删除记录，录像文件保留。全选范围为当前页已完成或失败的任务。</small>
+          </div>
           <div id="jobs-empty" class="empty-state" hidden><h3>这里还没有任务</h3><p>录制完成的视频会自动进入队列，也可以调整上方的筛选条件。</p></div>
           <div class="table-wrap" id="job-table-wrap">
-            <table><thead><tr><th>录像文件</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
+            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成或失败的记录"></th><th>录像文件</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
           </div>
           <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
           <p class="muted footnote">删除记录会保留原录像和转码后的视频；排队中或处理中的任务结束后才能删除。失败任务可查看原因并重试，文件已变化或同名输出已存在时会阻止覆盖。</p>
