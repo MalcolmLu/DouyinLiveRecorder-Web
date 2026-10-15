@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
+import queue_control
 
 from platform_utils import recording_roots, recording_relative
 from shared import (
@@ -75,17 +76,44 @@ class QueueRepository:
         if not exists:
             return "1"
         # An externally retried task must remain visible while it is processing.
-        return "(status NOT IN ('done','failed') OR NOT EXISTS (SELECT 1 FROM deleted_jobs WHERE deleted_jobs.id=jobs.id))"
+        return "(status NOT IN ('done','failed','stopped') OR NOT EXISTS (SELECT 1 FROM deleted_jobs WHERE deleted_jobs.id=jobs.id))"
+
+    def control(self):
+        if not self.paths.queue.exists():
+            return {"supported": False, "online": False, "mode": "running", "state": "offline",
+                    "phase": "offline", "current_job_id": None, "control_revision": 0, "order_revision": 0}
+        with self.connect() as db:
+            return queue_control.snapshot(db)
+
+    def change_control(self, action, revision, current_job_id=None):
+        with self.connect(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            queue_control.migrate(db)
+            try:
+                return queue_control.request_control(db, action, revision, current_job_id)
+            except queue_control.ControlError as exc:
+                raise AppError(str(exc), exc.code, exc.status) from exc
+
+    def reorder(self, revision, identifier=None, direction=None, sort=None):
+        if identifier is not None and (not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier)):
+            raise AppError("任务编号不正确。")
+        with self.connect(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            queue_control.migrate(db)
+            try:
+                return queue_control.reorder(db, revision, identifier, direction, sort)
+            except queue_control.ControlError as exc:
+                raise AppError(str(exc), exc.code, exc.status) from exc
 
     def summary(self):
         if not self.paths.queue.exists():
-            return {"queued": 0, "running": 0, "done": 0, "failed": 0, "saved_bytes": 0}
+            return {"queued": 0, "running": 0, "done": 0, "failed": 0, "stopped": 0, "saved_bytes": 0}
         with self.connect() as db:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
                 return {"queued":0,"running":0,"done":0,"failed":0,"saved_bytes":0}
             states = {r[0]: r[1] for r in db.execute("SELECT status,count(*) FROM jobs WHERE " + self.visible_jobs(db) + " GROUP BY status")}
             savings = db.execute("SELECT coalesce(sum(size-output_size),0) FROM jobs WHERE status='done' AND output_size>0").fetchone()[0]
-        return dict({"queued": 0, "running": 0, "done": 0, "failed": 0}, **states, saved_bytes=savings)
+        return dict({"queued": 0, "running": 0, "done": 0, "failed": 0, "stopped": 0}, **states, saved_bytes=savings)
 
     def jobs(self, status, search, page, page_size=25):
         if not self.paths.queue.exists():
@@ -102,8 +130,15 @@ class QueueRepository:
                 return {"items":[],"total":0,"page":page,"page_size":page_size}
             where = " WHERE " + " AND ".join([self.visible_jobs(db), *conditions])
             total = db.execute("SELECT count(*) FROM jobs" + where, params).fetchone()[0]
-            rows = db.execute("SELECT * FROM jobs" + where +
-                              " ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'published' THEN 1 WHEN 'queued' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,updated DESC LIMIT ? OFFSET ?",
+            controls = queue_control.snapshot(db)
+            queued = queue_control.queued_ids(db)
+            ranks = {identifier: index + 1 for index, identifier in enumerate(queued)}
+            ordered = queue_control.has_schema(db)
+            join = " LEFT JOIN queue_order ON job_id=jobs.id" if ordered else ""
+            order = "CASE WHEN status='queued' THEN coalesce(position,9223372036854775807) END," if ordered else ""
+            rows = db.execute("SELECT jobs.* FROM jobs" + join + where +
+                              " ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'published' THEN 1 WHEN 'queued' THEN 2 WHEN 'stopped' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END," + order +
+                              "CASE WHEN status='queued' THEN created END,updated DESC,jobs.id LIMIT ? OFFSET ?",
                               [*params, page_size, (page - 1) * page_size]).fetchall()
         items = []
         for r in rows:
@@ -117,9 +152,11 @@ class QueueRepository:
                 "id": row["id"], "name": source.name, "path": relative, "status": row["status"],
                 "size": row["size"], "output_size": row["output_size"], "updated": row["updated"],
                 "error": sanitize_error(row["error"]), "created": row["created"],
+                "queue_position": ranks.get(row["id"]), "queued_total": len(queued),
                 "saved_percent": round((1 - row["output_size"] / row["size"]) * 100, 1) if row["output_size"] and row["size"] else None,
             })
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+        return {"items": items, "total": total, "page": page, "page_size": page_size,
+                "control": controls, "order_revision": controls["order_revision"]}
 
     def delete_record(self, identifier):
         self.delete_records([identifier])
@@ -135,7 +172,7 @@ class QueueRepository:
             rows = db.execute("SELECT status FROM jobs WHERE id IN (" + placeholders + ")", identifiers).fetchall()
             if len(rows) != len(identifiers):
                 raise AppError("找不到这个任务。", "not_found", 404)
-            if any(row["status"] not in ("done", "failed") for row in rows):
+            if any(row["status"] not in queue_control.TERMINAL for row in rows):
                 raise AppError("排队中或处理中的任务暂不能删除，请等待任务结束。", "conflict", 409)
             self.migrate_deleted_jobs(db)
             deleted_at = time.time()
@@ -149,11 +186,12 @@ class QueueRepository:
         with self.connect(write=True) as db:
             db.execute("BEGIN IMMEDIATE")
             self.migrate_deleted_jobs(db)
+            queue_control.migrate(db)
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row or db.execute("SELECT 1 FROM deleted_jobs WHERE id=?", (identifier,)).fetchone():
                 raise AppError("找不到这个任务。", "not_found", 404)
-            if row["status"] != "failed":
-                raise AppError("只能重试失败任务。", "conflict", 409)
+            if row["status"] not in ("failed", "stopped"):
+                raise AppError("只能重新排队失败或已停止的任务。", "conflict", 409)
             try:
                 source = Path(row["source"]).resolve(strict=True)
                 recording_relative(source, recording_roots(self.paths.config,self.paths.downloads))
@@ -166,3 +204,4 @@ class QueueRepository:
             if target != source and target.exists():
                 raise AppError("同名 MP4 已存在，已保留两个文件，请先检查。", "destination_exists", 409)
             db.execute("UPDATE jobs SET status='queued',error=NULL,updated=? WHERE id=?", (time.time(), identifier))
+            queue_control.append_job(db, identifier)

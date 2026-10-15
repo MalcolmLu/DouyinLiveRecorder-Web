@@ -74,14 +74,21 @@
 
         <section id="page-jobs" class="page" hidden>
           <div class="page-heading"><div><span class="eyebrow">ENCODING WORKSPACE</span><h1>转码队列</h1><p class="muted">从录制文件到最终视频，每一步都看得见。</p></div><button id="refresh-jobs" class="secondary">刷新队列</button></div>
+          <div class="queue-controls">
+            <div class="queue-control-status"><strong id="queue-control-state" role="status" aria-live="polite">读取转码状态中</strong><p id="queue-control-detail" class="muted">暂停保留进度；停止保留未完成任务的原录像。</p></div>
+            <div class="queue-control-buttons"><button id="queue-pause" class="secondary small" type="button" disabled>暂停转码</button><button id="queue-resume" class="primary small" type="button" disabled>继续转码</button><button id="queue-stop" class="secondary small danger-button" type="button" disabled>停止转码</button></div>
+          </div>
           <div id="active-encoding" class="active-encoding" hidden>
-            <div><span class="eyebrow">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
+            <div><span class="eyebrow" id="active-phase">正在处理</span><h2 id="active-name">—</h2><p class="muted" id="active-detail">读取进度中</p></div>
             <div class="progress-area"><div class="progress-label"><span id="active-encoder-label">H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
           </div>
           <div class="queue-summary" id="queue-summary"></div>
+          <div class="queue-sort">
+            <label for="queue-sort">等待任务排序</label><select id="queue-sort"><option value="oldest">入队时间：从早到晚</option><option value="newest">入队时间：从晚到早</option><option value="smallest">文件大小：从小到大</option><option value="largest">文件大小：从大到小</option><option value="name">文件名：A → Z</option></select><button id="queue-apply-sort" class="secondary small" type="button" disabled>应用顺序</button><small class="muted">作用于全部等待任务；也可逐项置顶、上移或下移。</small>
+          </div>
           <div class="toolbar">
             <label class="sr-only" for="job-filter">任务状态</label>
-            <select id="job-filter"><option value="all">全部任务</option><option value="running">处理中</option><option value="queued">排队中</option><option value="failed">失败</option><option value="done">已完成</option></select>
+            <select id="job-filter"><option value="all">全部任务</option><option value="running">处理中</option><option value="queued">排队中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="done">已完成</option></select>
             <label class="sr-only" for="job-search">搜索文件名</label>
             <input id="job-search" type="search" placeholder="搜索文件名" maxlength="100">
             <span class="muted" id="jobs-total">—</span>
@@ -90,14 +97,14 @@
             <span id="job-selection-count" role="status" aria-live="polite">已选择 0 条</span>
             <button id="delete-selected-jobs" class="secondary small" type="button" disabled>删除所选记录</button>
             <button id="clear-job-selection" class="text-button" type="button" disabled>取消选择</button>
-            <small class="muted">仅删除记录，录像文件保留。全选范围为当前页已完成或失败的任务。</small>
+            <small class="muted">仅删除记录，录像文件保留。全选范围为当前页已完成、失败或已停止的任务。</small>
           </div>
           <div id="jobs-empty" class="empty-state" hidden><h3>这里还没有任务</h3><p>录制完成的视频会自动进入队列，也可以调整上方的筛选条件。</p></div>
           <div class="table-wrap" id="job-table-wrap">
-            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成或失败的记录"></th><th>录像文件</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
+            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成、失败或已停止的记录"></th><th>录像文件 / 转码顺序</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
           </div>
           <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
-          <p class="muted footnote">删除记录会保留原录像和转码后的视频；排队中或处理中的任务结束后才能删除。失败任务可查看原因并重试，文件已变化或同名输出已存在时会阻止覆盖。</p>
+          <p class="muted footnote">排序会改变实际转码顺序，正在处理的任务不换位。暂停后可继续当前进度；停止会中止当前任务并暂停队列，已停止的任务可重新排队，从头转码。删除记录会保留录像文件。</p>
         </section>
 
         <section id="page-settings" class="page" hidden>

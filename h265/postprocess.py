@@ -10,11 +10,14 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import signal
+import uuid
 import subprocess
 import sys
 import tempfile
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"gui"))
+import queue_control
 from platform_utils import acquire_lock, child_command, process_options, recording_relative, recording_roots, sync_directory
 
 HOME = Path(os.environ.get('RECORDER_CONFIG_DIR', '/app/config')).resolve() / 'h265'
@@ -64,6 +67,7 @@ def connect():
                "status TEXT NOT NULL DEFAULT 'queued', error TEXT, output TEXT, "
                'output_size INTEGER, output_mtime INTEGER, '
                'created REAL NOT NULL, updated REAL NOT NULL)')
+    queue_control.migrate(db)
     db.commit()
     try:
         yield db
@@ -86,11 +90,13 @@ def enqueue(file, delete_source=True, h264=False):
     identifier = hashlib.sha256(
         f'{file}\0{stat.st_size}\0{stat.st_mtime_ns}'.encode()).hexdigest()
     with connect() as db:
-        db.execute('INSERT OR IGNORE INTO jobs '
+        inserted = db.execute('INSERT OR IGNORE INTO jobs '
                    '(id,source,size,mtime,delete_source,h264,created,updated) '
                    'VALUES (?,?,?,?,?,?,?,?)',
                    (identifier, str(file), stat.st_size, stat.st_mtime_ns,
                     int(delete_source), int(h264), time.time(), time.time()))
+        if inserted.rowcount:
+            queue_control.append_job(db, identifier)
     return identifier
 
 
@@ -115,8 +121,40 @@ def ensure_worker():
                                  pass_fds=(lock.fileno(),))
 
 
+JOB_CONTROL = None
+SHUTDOWN = False
+
+
+def run_process(command, **kwargs):
+    if JOB_CONTROL is not None:
+        return JOB_CONTROL.run(command, **kwargs)
+    return subprocess.run(command, **kwargs)
+
+
+def process_output(command, **kwargs):
+    if JOB_CONTROL is not None:
+        kwargs.setdefault('stdin', subprocess.DEVNULL)
+        return JOB_CONTROL.run(command, check=True, stdout=subprocess.PIPE, **kwargs).stdout
+    return subprocess.check_output(command, **kwargs)
+
+
+def checkpoint(phase):
+    if JOB_CONTROL is not None:
+        JOB_CONTROL.checkpoint(phase=phase)
+
+
+@contextmanager
+def publication():
+    if JOB_CONTROL is not None:
+        with JOB_CONTROL.publication(connect) as db:
+            yield db
+    else:
+        with connect() as db:
+            yield db
+
+
 def probe(file):
-    raw = subprocess.check_output(
+    raw = process_output(
         ['ffprobe', '-v', 'error', '-show_entries',
          'format=duration:stream=codec_type,codec_name,width,height,pix_fmt,color_range', '-of', 'json', str(file)],
         stderr=subprocess.STDOUT, timeout=120)
@@ -132,7 +170,7 @@ def probe(file):
 
 def mapped_packet_counts(file):
     """Read the entire file, counting the first video and every mapped audio stream."""
-    raw = subprocess.check_output(
+    raw = process_output(
         ['ffprobe', '-v', 'error', '-count_packets', '-show_entries',
          'stream=codec_type,nb_read_packets', '-of', 'json', str(file)],
         stderr=subprocess.STDOUT, timeout=1800, **process_options())
@@ -154,7 +192,7 @@ def normalized_reference(file):
                '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
                '-fps_mode', 'passthrough', '-progress', 'pipe:1', '-f', 'null', '-']
     with tempfile.TemporaryFile() as errors:
-        result = subprocess.run(command, check=True, stdin=subprocess.DEVNULL,
+        result = run_process(command, check=True, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=errors,
                                 timeout=1800, **process_options())
     progress = dict(line.split('=', 1) for line in result.stdout.decode().splitlines() if '=' in line)
@@ -167,7 +205,7 @@ def normalized_reference(file):
 
 def mapped_stream_timings(file):
     """Read MP4 track lengths, including audio that outlasts the final video packet."""
-    raw = subprocess.check_output(
+    raw = process_output(
         ['ffprobe', '-v', 'error', '-show_entries',
          'format=duration:stream=codec_type,start_time,duration', '-of', 'json', str(file)],
         stderr=subprocess.STDOUT, timeout=120, **process_options())
@@ -196,7 +234,7 @@ def verify_mp4_timeline(source, output, source_counts, output_duration):
                    '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
                    '-fps_mode', 'passthrough', '-avoid_negative_ts', 'make_zero', str(reference)]
         with tempfile.TemporaryFile() as errors:
-            subprocess.run(command, check=True, stdin=subprocess.DEVNULL,
+            run_process(command, check=True, stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=errors,
                            timeout=1800, **process_options())
         if mapped_packet_counts(reference) != source_counts:
@@ -270,6 +308,7 @@ def unchanged(file, job):
 
 
 def encode(job):
+    checkpoint('preparing')
     source = Path(job['source']).resolve(strict=True)
     recording_relative(source,recording_roots(HOME.parent,ROOT))
     if not unchanged(source, job):
@@ -357,10 +396,12 @@ def encode(job):
             if (RUNTIME / 'dri/iHD_drv_video.so').is_file():
                 environment['LIBVA_DRIVERS_PATH'] = str(RUNTIME / 'dri')
                 environment['LIBVA_DRIVER_NAME'] = 'iHD'
+        checkpoint('encoding')
         with open(HOME / 'ffmpeg-last.log', 'wb') as errors:
-            subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL,
+            run_process(cmd, check=True, stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=errors,
                            env=environment,**({"preexec_fn":limit_resources} if os.name!="nt" else process_options()))
+        checkpoint('verifying')
         duration, output_video, output_audio_count = probe(temporary)
         if output_video['codec_name'] != expected_codec:
             raise ValueError('Output codec verification failed')
@@ -376,10 +417,10 @@ def encode(job):
         # Windows FlushFileBuffers requires a writable file handle.
         with temporary.open('rb+') as stream:
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-        sync_directory(destination.parent)
-        published_stat = destination.stat()
-        with connect() as db:
+        with publication() as db:
+            os.replace(temporary, destination)
+            sync_directory(destination.parent)
+            published_stat = destination.stat()
             db.execute("UPDATE jobs SET status='published',output=?,output_size=?,output_mtime=?,updated=? WHERE id=?",
                        (str(destination), published_stat.st_size, published_stat.st_mtime_ns,
                         time.time(), job['id']))
@@ -420,6 +461,7 @@ def finish_published(job):
 
 
 def worker(inherited_fd=None):
+    global JOB_CONTROL, SHUTDOWN
     HOME.mkdir(parents=True, exist_ok=True)
     lock = os.fdopen(inherited_fd, 'a') if inherited_fd is not None else open(HOME / 'worker.lock', 'a')
     with lock:
@@ -432,30 +474,75 @@ def worker(inherited_fd=None):
         LOG.addHandler(handler)
         LOG.setLevel(logging.INFO)
         (HOME / 'worker.pid').write_text(str(os.getpid()))
+        token = uuid.uuid4().hex
+        SHUTDOWN = False
+        def shutdown(signum, frame):
+            global SHUTDOWN
+            SHUTDOWN = True
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, shutdown)
         with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = db.execute("SELECT mode,stop_job_id FROM queue_control WHERE id=1").fetchone()
+            if state['mode'] == 'stopped' and state['stop_job_id']:
+                db.execute("UPDATE jobs SET status='stopped',error=NULL,updated=? WHERE status='running' AND id=?",
+                           (time.time(), state['stop_job_id']))
             db.execute("UPDATE jobs SET status='queued',updated=? WHERE status='running'", (time.time(),))
-        LOG.info('Worker ready; one job at a time')
-        while True:
-            if (HOME / 'paused').exists():
-                time.sleep(3)
-                continue
-            with connect() as db:
-                job = db.execute("SELECT * FROM jobs WHERE status IN ('published','queued') ORDER BY CASE status WHEN 'published' THEN 0 ELSE 1 END,created LIMIT 1").fetchone()
-                if job and job['status'] != 'published':
-                    db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), job['id']))
-            if not job:
-                time.sleep(3)
-                continue
-            try:
-                if job['status'] == 'published':
-                    finish_published(job)
-                else:
-                    encode(job)
-            except Exception as exc:
+            queue_control.runtime(db, token, 'starting')
+        LOG.info('Worker ready; cooperative controls and persistent queue order enabled')
+        try:
+            while not SHUTDOWN:
                 with connect() as db:
-                    db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?",
-                               (str(exc), time.time(), job['id']))
-                LOG.error('Failed %s: %s; available video retained', Path(job['source']).name, exc)
+                    db.execute("BEGIN IMMEDIATE")
+                    mode = db.execute("SELECT mode FROM queue_control WHERE id=1").fetchone()[0]
+                    if (HOME / 'paused').exists():
+                        job = None
+                        queue_control.runtime(db, token, 'maintenance')
+                    elif mode != 'running':
+                        job = None
+                        queue_control.runtime(db, token, mode)
+                    else:
+                        job = db.execute("SELECT jobs.* FROM jobs LEFT JOIN queue_order ON job_id=jobs.id "
+                                         "WHERE status IN ('published','queued') ORDER BY "
+                                         "CASE status WHEN 'published' THEN 0 ELSE 1 END,"
+                                         "position IS NULL,position,created,jobs.id LIMIT 1").fetchone()
+                        if job and job['status'] != 'published':
+                            db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), job['id']))
+                            db.execute("UPDATE queue_control SET order_revision=order_revision+1 WHERE id=1")
+                        queue_control.runtime(db, token, ('finalizing' if job['status'] == 'published' else 'preparing') if job else 'idle',
+                                              job['id'] if job else None)
+                if not job:
+                    time.sleep(.5)
+                    continue
+                try:
+                    if job['status'] == 'published':
+                        finish_published(job)
+                    else:
+                        JOB_CONTROL = queue_control.JobControl(DB, token, job['id'], lambda: SHUTDOWN)
+                        encode(job)
+                except queue_control.JobStopped:
+                    with connect() as db:
+                        db.execute("UPDATE jobs SET status='stopped',error=NULL,updated=? WHERE id=? AND status='running'",
+                                   (time.time(), job['id']))
+                    LOG.info('Stopped %s; original retained', Path(job['source']).name)
+                except queue_control.WorkerShutdown:
+                    with connect() as db:
+                        db.execute("UPDATE jobs SET status='queued',error=NULL,updated=? WHERE id=? AND status='running'",
+                                   (time.time(), job['id']))
+                    return
+                except Exception as exc:
+                    with connect() as db:
+                        db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?",
+                                   (str(exc), time.time(), job['id']))
+                    LOG.error('Failed %s: %s; available video retained', Path(job['source']).name, exc)
+                finally:
+                    JOB_CONTROL = None
+        finally:
+            JOB_CONTROL = None
+            with connect() as db:
+                queue_control.runtime(db, token, 'offline')
+            LOG.removeHandler(handler)
+            handler.close()
 
 
 def main():
@@ -476,7 +563,10 @@ def main():
         print('H265 queued:', enqueue(args.source, args.delete_original == 'yes', args.h264 == 'yes')[:12])
     if args.retry_failed:
         with connect() as db:
+            failed = db.execute("SELECT id FROM jobs WHERE status='failed' ORDER BY created,id").fetchall()
             db.execute("UPDATE jobs SET status='queued',error=NULL,updated=? WHERE status='failed'", (time.time(),))
+            for row in failed:
+                queue_control.append_job(db, row[0])
     if args.status:
         with connect() as db:
             print(json.dumps({r['status']: r['n'] for r in db.execute('SELECT status,count(*) n FROM jobs GROUP BY status')}, ensure_ascii=False))

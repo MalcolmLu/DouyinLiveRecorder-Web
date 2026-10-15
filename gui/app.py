@@ -182,9 +182,28 @@ def create_app(paths=None, testing=False, desktop=None):
             page = int(request.args.get("page", "1"))
         except ValueError:
             raise AppError("页码不正确。")
-        if status not in ("all", "queued", "running", "published", "done", "failed") or len(search) > 100 or not 1 <= page <= 10000:
+        if status not in ("all", "queued", "running", "published", "done", "failed", "stopped") or len(search) > 100 or not 1 <= page <= 10000:
             raise AppError("筛选条件不正确。")
         return jsonify(queue.jobs(status, search, page))
+
+    @app.post("/api/queue/control")
+    def control_queue():
+        data = body()
+        state = queue.change_control(data.get("action"), data.get("revision"), data.get("current_job_id"))
+        return jsonify(ok=True, control=state, message="转码控制指令已提交。")
+
+    @app.post("/api/queue/order")
+    def order_queue():
+        data = body()
+        if "sort" in data:
+            if "job_id" in data or "move" in data or data["sort"] is None:
+                raise AppError("请只选择一种排序操作。")
+            state = queue.reorder(data.get("revision"), sort=data["sort"])
+        else:
+            if not isinstance(data.get("job_id"), str):
+                raise AppError("请选择等待转码的任务。")
+            state = queue.reorder(data.get("revision"), identifier=data["job_id"], direction=data.get("move"))
+        return jsonify(ok=True, control=state, message="等待任务的实际转码顺序已更新。")
 
     @app.post("/api/jobs/<identifier>/retry")
     def retry(identifier):

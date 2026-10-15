@@ -2,9 +2,10 @@ const $ = (s) => document.querySelector(s);
 const ctx = {csrf:null, snapshot:null, page:"live", jobPage:1, jobs:null, revision:null, settingsRevision:null, proxyRevision:null, busy:false,desktop:false,desktopData:null};
 const library = {room:null, folder:"", page:1, data:null, request:0};
 const jobSelection = {ids:new Set(), deleting:false, request:0};
+const queueActions = {busy:false, control:null};
 const statusText = {unknown:"等待检测", checking:"检测中", offline:"等待开播", live:"正在直播",
   recording:"正在录制", disabled:"已暂停", error:"采集异常", queued:"排队中", running:"转码中",
-  published:"验证后收尾", done:"已完成", failed:"失败"};
+  published:"验证后收尾", done:"已完成", failed:"失败", paused:"已暂停", stopped:"已停止"};
 let toastTimer, searchTimer;
 
 class ApiError extends Error {
@@ -200,13 +201,41 @@ $("#recording-player").addEventListener("error",()=>{
 function renderSummary() {
   const q=ctx.snapshot?.queue;if(!q) return;
   const target=$("#queue-summary");target.replaceChildren();
-  for(const [key,label] of [["running","处理中"],["queued","排队中"],["done","已完成"],["failed","失败"]]){
+  for(const [key,label] of [["running","处理中"],["queued","排队中"],["stopped","已停止"],["done","已完成"],["failed","失败"]]){
     const d=node("span",label);d.append(node("strong",q[key]||0));target.append(d);
   }
+  renderQueueControl(ctx.snapshot?.queue_control);
+}
+function renderQueueControl(control) {
+  if(control) queueActions.control=control;
+  const state=queueActions.control, ready=state?.supported && state.online && state.phase!=="maintenance";
+  const busy=queueActions.busy || jobSelection.deleting, mode=state?.mode || "running";
+  const labels={offline:"转码控制未连接",maintenance:"转码服务更新中",starting:"转码服务启动中",idle:"等待转码任务",preparing:"准备转码",encoding:"正在转码",verifying:"正在验证视频",publishing:"正在保存视频",finalizing:"正在完成收尾",pausing:"正在暂停转码",paused:"转码已暂停",stopping:"正在停止转码",stopped:"转码已停止",resuming:"正在继续转码"};
+  setText("#queue-control-state",labels[state?.state] || "正在连接转码服务");
+  setText("#queue-control-detail",!ready ? "正在连接转码进程，请稍后刷新。" : mode==="stopped" ? "停止会保留未完成任务的原录像。继续后处理其余等待任务；已停止的任务需重新排队，从头转码。" : mode==="paused" ? "当前进度保留，继续后接着转码。直播录制仍会继续。" : "按下方顺序转码。暂停保留进度；停止保留未完成任务的原录像。" );
+  $("#queue-pause").disabled=busy || !ready || mode!=="running";
+  $("#queue-resume").disabled=busy || !ready || mode==="running" || state?.state==="stopping";
+  $("#queue-stop").disabled=busy || !ready || mode==="stopped";
+  const queued=ctx.snapshot?.queue?.queued || (ctx.jobs?.items || []).filter(job=>job.status==="queued").length;
+  $("#queue-apply-sort").disabled=busy || !ready || !queued;
+  $("#queue-sort").disabled=busy || !ready;
+  if(mode!=="running")setText("#metric-queue-note",mode==="paused" ? "转码已暂停，录制继续" : "转码已停止，录制继续");
+}
+async function queueRequest(path,payload) {
+  if(queueActions.busy || jobSelection.deleting)return;
+  queueActions.busy=true;renderQueueControl();if(ctx.jobs)renderJobs(ctx.jobs);
+  try {
+    const result=await api(path,{method:"POST",body:JSON.stringify(payload)});
+    renderQueueControl(result.control);toast(result.message);await loadJobs();
+    ctx.snapshot=await api("/api/dashboard");renderRooms();renderSummary();
+  } catch(e) {
+    toast(e.message);try{await loadJobs();}catch(error){globalError(error.message);}
+  } finally {queueActions.busy=false;renderQueueControl();if(ctx.jobs)renderJobs(ctx.jobs);}
 }
 function renderJobs(data) {
   ctx.jobs=data;const body=$("#job-table");body.replaceChildren();
-  const deletable=new Set(data.items.filter(job=>["done","failed"].includes(job.status)).map(job=>job.id));
+  renderQueueControl(data.control);
+  const deletable=new Set(data.items.filter(job=>["done","failed","stopped"].includes(job.status)).map(job=>job.id));
   for(const id of jobSelection.ids) if(!deletable.has(id)) jobSelection.ids.delete(id);
   $("#jobs-empty").hidden=data.items.length>0;$("#job-table-wrap").hidden=!data.items.length;
   setText("#jobs-total",data.total+" 个任务");setText("#page-label","第 "+data.page+" 页 / 共 "+Math.max(1,Math.ceil(data.total/data.page_size))+" 页");
@@ -226,8 +255,21 @@ function renderJobs(data) {
     });
     selectCell.append(checkbox);tr.append(selectCell);
     const t=node("div",job.name,"cell-title");t.title=job.name;
-    title.append(t,node("div",job.path,"cell-subtitle"));tr.append(title);
-    const status=node("td");status.append(badge(job.status));
+    title.append(t,node("div",job.path,"cell-subtitle"));
+    if(job.status==="queued" && job.queue_position){
+      const order=node("div",null,"queue-order-actions");order.append(node("span","第 "+job.queue_position+" 项"));
+      for(const [move,label] of [["top","置顶"],["up","上移"],["down","下移"],["bottom","置底"]]){
+        const change=button(label,()=>queueRequest("/api/queue/order",{revision:ctx.jobs.order_revision,job_id:job.id,move}));
+        change.setAttribute("aria-label",label+"“"+job.name+"”");change.dataset.move=move;
+        change.disabled=queueActions.busy || jobSelection.deleting || !queueActions.control?.online || !queueActions.control?.supported ||
+          ((move==="top" || move==="up") && job.queue_position===1) || ((move==="down" || move==="bottom") && job.queue_position===job.queued_total);
+        order.append(change);
+      }
+      title.append(order);
+    }
+    tr.append(title);
+    const paused=job.status==="running" && queueActions.control?.current_job_id===job.id && queueActions.control.phase==="paused";
+    const status=node("td");status.append(badge(paused ? "paused" : job.status));
     const progress=ctx.snapshot?.progress;
     if(job.status==="running") {
       active=job;
@@ -239,18 +281,18 @@ function renderJobs(data) {
     const savings=node("td",job.saved_percent===null ? "—" : (job.saved_percent>=0 ? "减少 " : "增加 ")+Math.abs(job.saved_percent)+"%",job.saved_percent===null ? "" : job.saved_percent>=0 ? "positive" : "negative");
     tr.append(savings);
     const control=node("td",null,"align-right"), actions=node("div",null,"actions");
-    if(job.status==="failed"){
-      actions.append(button("查看原因",()=>{setText("#error-detail",job.error || "没有记录到详细错误。");$("#error-dialog").showModal();}));
-      const retry=button("重试",()=>action(retry,async()=>{
+    if(["failed","stopped"].includes(job.status)){
+      if(job.status==="failed")actions.append(button("查看原因",()=>{setText("#error-detail",job.error || "没有记录到详细错误。");$("#error-dialog").showModal();}));
+      const retry=button(job.status==="stopped" ? "重新排队" : "重试",()=>action(retry,async()=>{
         await api("/api/jobs/"+job.id+"/retry",{method:"POST",body:"{}"});toast("任务已重新排队。");await refresh();
-      }));retry.disabled=jobSelection.deleting;actions.append(retry);
+      }));retry.disabled=jobSelection.deleting || queueActions.busy;actions.append(retry);
     } else {actions.append(node("span",job.status==="done" ? "已验证" : "自动处理","muted"));}
     const remove=button("删除记录",()=>action(remove,async()=>{
       if(!window.confirm("删除“"+job.name+"”的转码记录？原录像和转码后的视频都会保留。")) return;
       const result=await api("/api/jobs/"+job.id,{method:"DELETE"});
       toast(result.message);await refresh();
     }));
-    remove.disabled=!["done","failed"].includes(job.status) || jobSelection.deleting;
+    remove.disabled=!["done","failed","stopped"].includes(job.status) || jobSelection.deleting || queueActions.busy;
     remove.title=remove.disabled ? "排队中或处理中，请等待任务结束后删除记录。" : "仅删除记录，保留录像文件。";
     actions.append(remove);
     control.append(actions);tr.append(control);body.append(tr);
@@ -258,22 +300,25 @@ function renderJobs(data) {
   syncJobSelection();
   $("#active-encoding").hidden=!active;
   if(active){
+    const phase=queueActions.control?.phase, paused=phase==="paused";
+    $("#active-encoding").classList.toggle("is-paused",paused);
+    setText("#active-phase",paused ? "已暂停 · 进度保留" : phase==="verifying" ? "正在验证视频" : phase==="publishing" ? "正在保存视频" : "正在处理");
     setText("#active-name",active.name);
     const p=ctx.snapshot?.progress, matches=p?.job_id===active.id;
     setText("#active-percent",matches && p.percent!==null ? p.percent+"%" : "读取中");
     const bar=$("#active-progress");
     if(matches && p.percent!==null) bar.value=p.percent;else bar.removeAttribute("value");
-    setText("#active-detail",matches ? "已处理 "+Math.floor(p.processed_seconds/60)+" 分钟 / 共 "+Math.ceil(p.duration/60)+" 分钟"+(p.speed>0 ? " · "+p.speed.toFixed(1)+"×" : "") : "正在编码，等待编码器上报进度。");
+    setText("#active-detail",matches ? "已处理 "+Math.floor(p.processed_seconds/60)+" 分钟 / 共 "+Math.ceil(p.duration/60)+" 分钟"+(paused ? " · 已暂停" : p.speed>0 ? " · "+p.speed.toFixed(1)+"×" : "") : "正在准备视频，等待编码器上报进度。");
   }
 }
 function syncJobSelection() {
-  const eligible=(ctx.jobs?.items || []).filter(job=>["done","failed"].includes(job.status));
+  const eligible=(ctx.jobs?.items || []).filter(job=>["done","failed","stopped"].includes(job.status));
   const count=jobSelection.ids.size, all=$("#select-all-jobs");
   all.checked=eligible.length>0 && count===eligible.length;
   all.indeterminate=count>0 && count<eligible.length;
   all.disabled=jobSelection.deleting || !eligible.length;
   setText("#job-selection-count","已选择 "+count+" 条");
-  $("#delete-selected-jobs").disabled=jobSelection.deleting || !count;
+  $("#delete-selected-jobs").disabled=jobSelection.deleting || queueActions.busy || !count;
   $("#clear-job-selection").disabled=jobSelection.deleting || !count;
   document.querySelectorAll(".job-checkbox").forEach(input=>{
     input.checked=jobSelection.ids.has(input.dataset.jobId);
@@ -357,15 +402,25 @@ async function loadProxy() {
 }
 
 $("#logout").addEventListener("click",()=>action($("#logout"),async()=>{await api("/api/logout",{method:"POST",body:"{}"});location.replace("/");}));
+for(const [selector,command] of [["#queue-pause","pause"],["#queue-resume","resume"],["#queue-stop","stop"]]){
+  $(selector).addEventListener("click",()=>{
+    const state=queueActions.control;if(!state || queueActions.busy)return;
+    if(command==="stop" && !window.confirm("停止当前转码并暂停后续队列？未完成任务的原录像会保留，当前转码进度会丢弃。已停止的任务重新排队后将从头转码。"))return;
+    queueRequest("/api/queue/control",{action:command,revision:state.control_revision,current_job_id:state.current_job_id});
+  });
+}
+$("#queue-apply-sort").addEventListener("click",()=>{
+  if(ctx.jobs)queueRequest("/api/queue/order",{revision:ctx.jobs.order_revision,sort:$("#queue-sort").value});
+});
 $("#select-all-jobs").addEventListener("change",e=>{
   if(jobSelection.deleting)return;
   jobSelection.ids.clear();
-  if(e.target.checked) for(const job of ctx.jobs?.items || []) if(["done","failed"].includes(job.status)) jobSelection.ids.add(job.id);
+  if(e.target.checked) for(const job of ctx.jobs?.items || []) if(["done","failed","stopped"].includes(job.status)) jobSelection.ids.add(job.id);
   syncJobSelection();
 });
 $("#clear-job-selection").addEventListener("click",clearJobSelection);
 $("#delete-selected-jobs").addEventListener("click",async()=>{
-  if(jobSelection.deleting || !jobSelection.ids.size)return;
+  if(jobSelection.deleting || queueActions.busy || !jobSelection.ids.size)return;
   const ids=[...jobSelection.ids];
   if(!window.confirm("删除所选的 "+ids.length+" 条转码记录？原录像和转码后的视频都会保留。"))return;
   jobSelection.deleting=true;if(ctx.jobs)renderJobs(ctx.jobs);else syncJobSelection();
