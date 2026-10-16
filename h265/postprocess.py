@@ -15,9 +15,11 @@ import uuid
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"gui"))
 import queue_control
+from segment_queue import ClosedSegmentScanner
 from platform_utils import acquire_lock, child_command, process_options, recording_relative, recording_roots, sync_directory
 
 HOME = Path(os.environ.get('RECORDER_CONFIG_DIR', '/app/config')).resolve() / 'h265'
@@ -492,6 +494,12 @@ def worker(inherited_fd=None):
             db.execute("UPDATE jobs SET status='queued',updated=? WHERE status='running'", (time.time(),))
             queue_control.runtime(db, token, 'starting')
         LOG.info('Worker ready; cooperative controls and persistent queue order enabled')
+        scanner_stop = threading.Event()
+        scanner = ClosedSegmentScanner(HOME.parent, lambda: recording_roots(HOME.parent, ROOT),
+                                       connect, enqueue, opened_by_ffmpeg, logger=LOG)
+        scanner_thread = threading.Thread(target=scanner.run, args=(scanner_stop,),
+                                          name='completed-recording-segments', daemon=True)
+        scanner_thread.start()
         try:
             while not SHUTDOWN:
                 with connect() as db:
@@ -541,6 +549,8 @@ def worker(inherited_fd=None):
                     JOB_CONTROL = None
         finally:
             JOB_CONTROL = None
+            scanner_stop.set()
+            scanner_thread.join(timeout=10)
             with connect() as db:
                 queue_control.runtime(db, token, 'offline')
             LOG.removeHandler(handler)

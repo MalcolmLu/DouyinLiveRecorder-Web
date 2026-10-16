@@ -95,8 +95,10 @@ p.run_process=run
 p.worker()
 """
             with (home / "test-worker.log").open("ab") as log:
+                environment = os.environ.copy()
+                environment["GUI_STATE_DIR"] = str(home.parent / "gui/state")
                 process = subprocess.Popen([sys.executable, "-c", code, str(processor_path), str(home), str(downloads),
-                                            "yes" if paced else "no"], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+                                            "yes" if paced else "no"], stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=environment)
             children.append(process)
             return process
 
@@ -175,6 +177,66 @@ p.worker()
             stop_worker(worker)
             print("PASS pause freezes real FFmpeg, resume continues, stop reaps child and retains source byte-for-byte")
             print("PASS unfinished output removed, later jobs wait, stop persists after restart, resume skips stopped jobs")
+
+            _, home, downloads = setup("live-segments")
+            state_dir = home.parent / "gui/state"; state_dir.mkdir(parents=True)
+            (home.parent / "config.ini").write_text("[录制设置]\n录制完成后自动转为mp4格式 = 是\n追加格式后删除原文件 = 否\n", encoding="utf-8")
+            began = time.time()
+            pattern = "live_%Y-%m-%d_%H-%M-%S.ts"
+            with processor.connect():
+                pass
+            def heartbeat():
+                temporary = state_dir / "runtime.new"
+                temporary.write_text(json.dumps({"heartbeat": time.time(), "rooms": {
+                    "isolated-live": {"state": "recording", "file": pattern, "started_at": began}}}))
+                os.replace(temporary, state_dir / "runtime.json")
+            heartbeat()
+            with (home / "test-recorder.log").open("ab") as log:
+                recorder = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-re",
+                    "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "18", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-threads", "1", "-g", "10", "-f", "segment", "-segment_time", "2",
+                    "-reset_timestamps", "1", "-strftime", "1", str(downloads / pattern)],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            children.append(recorder)
+            worker = start(home, downloads, False)
+            converted_during_recording = False
+            while recorder.poll() is None:
+                heartbeat()
+                with db(home) as connection:
+                    done = connection.execute("SELECT count(*) FROM jobs WHERE status='done'").fetchone()[0]
+                if done:
+                    converted_during_recording = True
+                    if Path("/proc").is_dir():
+                        opened = set()
+                        for descriptor in Path("/proc").joinpath(str(recorder.pid), "fd").iterdir():
+                            try:
+                                opened.add(Path(os.readlink(descriptor)))
+                            except OSError:
+                                pass
+                    else:
+                        import psutil
+                        opened = {Path(item.path) for item in psutil.Process(recorder.pid).open_files()}
+                    active = [file for file in downloads.glob("*.ts") if file in opened]
+                    assert active, "Recording should still have an open part"
+                    with db(home) as connection:
+                        for file in active:
+                            assert not connection.execute("SELECT 1 FROM jobs WHERE source=?", (str(file),)).fetchone(), "Open recording part was queued"
+                    break
+                time.sleep(.2)
+            assert converted_during_recording, "Closed parts did not transcode until the whole session ended"
+            while recorder.poll() is None:
+                heartbeat(); time.sleep(.2)
+            assert recorder.returncode == 0
+            # The collector's existing session-end callback queues the final part.
+            (state_dir / "runtime.json").write_text(json.dumps({"heartbeat": time.time(), "rooms": {}}))
+            parts = list(downloads.glob("*.ts"))
+            for file in parts:
+                processor.enqueue(file, False)
+            wait(lambda: all(status(home, processor.enqueue(file, False)) == "done" for file in parts), "final session-end part completion")
+            with db(home) as connection:
+                assert connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == len(parts), "Session-end callbacks duplicated segment jobs"
+            stop_worker(worker)
+            print("PASS closed segments transcode while real recording continues; open part protected and final callback deduplicated")
         except Exception:
             for log in root.glob("*/config/h265/test-worker.log"):
                 print(log.read_text(errors="replace")[-4000:], file=sys.stderr)

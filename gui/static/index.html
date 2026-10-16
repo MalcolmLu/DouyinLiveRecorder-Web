@@ -69,7 +69,7 @@
           <div class="table-wrap" id="room-table-wrap" hidden>
             <table><thead><tr><th>直播间</th><th>状态</th><th>连接方式</th><th>录制画质</th><th>本次录制</th><th class="align-right">操作</th></tr></thead><tbody id="room-table"></tbody></table>
           </div>
-          <div class="workflow-note"><span class="workflow-tag">自动流程</span><p>直播录制结束 → 分段进入队列 → 核显转码 → 验证文件 → 按设置保留或删除原文件。<br><span class="muted">每小时切出的分段先保存为录制格式，整次直播录制结束后统一入队。</span></p></div>
+          <div class="workflow-note"><span class="workflow-tag">自动流程</span><p>每个分 P 录完 → 自动进入队列 → 核显转码 → 验证文件 → 按设置保留或删除原文件。<br><span class="muted">分段关闭并稳定后约 5–10 秒入队，直播录制继续；正在写入的分段等待录完。</span></p></div>
         </section>
 
         <section id="page-jobs" class="page" hidden>
