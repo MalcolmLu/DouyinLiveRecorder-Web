@@ -73,6 +73,7 @@ jobs:
           python -m unittest discover -s gui -p "test_segment_names.py" -v
           python h265/selftest.py
           python h265/queue_selftest.py
+          python h265/merge_selftest.py
       - run: npm run dist -- ${{ matrix.target }} --publish never
         working-directory: desktop
       - uses: actions/upload-artifact@v4

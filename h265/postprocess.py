@@ -17,8 +17,11 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"gui"))
 import queue_control
+import merge_queue
+import merge_encoder
 from segment_queue import ClosedSegmentScanner
 from platform_utils import acquire_lock, child_command, process_options, recording_relative, recording_roots, sync_directory
 
@@ -312,6 +315,10 @@ def unchanged(file, job):
 
 
 def encode(job):
+    with connect() as db:
+        record = merge_queue.merge_job(db, job['id'])
+    if record:
+        return merge_encoder.encode(SimpleNamespace(**globals()), job, dict(record))
     checkpoint('preparing')
     source = Path(job['source']).resolve(strict=True)
     recording_relative(source,recording_roots(HOME.parent,ROOT))
@@ -447,6 +454,10 @@ def encode(job):
 
 
 def finish_published(job):
+    with connect() as db:
+        record = merge_queue.merge_job(db, job['id'])
+    if record:
+        return merge_encoder.finish(SimpleNamespace(**globals()), job, dict(record))
     destination = Path(job['output']).resolve(strict=True)
     recording_relative(destination,recording_roots(HOME.parent,ROOT))
     stat = destination.stat()
@@ -497,7 +508,8 @@ def worker(inherited_fd=None):
         scanner_stop = threading.Event()
         scanner = ClosedSegmentScanner(HOME.parent, lambda: recording_roots(HOME.parent, ROOT),
                                        connect, enqueue, opened_by_ffmpeg, logger=LOG)
-        scanner_thread = threading.Thread(target=scanner.run, args=(scanner_stop,),
+        merger = merge_queue.MergeManager(HOME.parent, scanner.roots, connect, opened_by_ffmpeg)
+        scanner_thread = threading.Thread(target=scanner.run, args=(scanner_stop, merger.scan_once),
                                           name='completed-recording-segments', daemon=True)
         scanner_thread.start()
         try:

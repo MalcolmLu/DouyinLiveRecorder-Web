@@ -133,10 +133,12 @@ class ClosedSegmentScanner:
                 continue
         return added
 
-    def run(self, stop):
+    def run(self, stop, after_scan=None):
         while not stop.is_set():
             try:
                 self.scan_once()
+                if after_scan:
+                    after_scan()
             except Exception as error:
                 self.logger.warning("Completed segment scan will retry: %s", type(error).__name__)
             stop.wait(self.interval)

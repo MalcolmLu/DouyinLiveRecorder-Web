@@ -111,7 +111,7 @@ function renderRooms() {
     if(room.applied_proxy!==null && room.applied_proxy!==undefined && room.applied_proxy!==room.uses_proxy && room.state==="recording") route.append(node("div","下次检测生效","cell-subtitle"));
     tr.append(route,node("td",room.quality),node("td",room.state==="recording" ? elapsed(room.started_at) : "—"));
     const controls=node("td",null,"align-right"), actions=node("div",null,"actions");
-    actions.append(button("录像文件夹",()=>openRecordings(room),"row-button room-recordings"),button("编辑",() => openRoom(room)));
+    actions.append(button("录像文件夹",()=>openRecordings(room),"row-button room-recordings"),button("合并分 P",()=>openMerges(room),"row-button room-merge"),button("编辑",() => openRoom(room)));
     const toggle=button(room.enabled ? "暂停监控" : "恢复监控",() => action(toggle,async() => {
       if(room.state==="recording" && !window.confirm("暂停会结束这个直播间当前的录制，已写入的视频会保留并按设置处理。是否暂停？")) return;
       await api("/api/rooms/"+room.id,{method:"PATCH",body:JSON.stringify({enabled:!room.enabled,revision:ctx.snapshot.revision})});
@@ -137,6 +137,40 @@ function closeRecordings() {
   stopPlayback();
   if($("#recordings-dialog").open) $("#recordings-dialog").close();
 }
+const mergeView={room:null,request:0};
+async function openMerges(room){
+  mergeView.room=room;
+  setText("#merge-title",room.display_name+" · 合并同场分 P");
+  if(!$("#merge-dialog").open)$("#merge-dialog").showModal();
+  await loadMerges();
+}
+async function loadMerges(){
+  const room=mergeView.room;if(!room)return;
+  const request=++mergeView.request;setText("#merge-error","");
+  try{
+    const data=await api("/api/rooms/"+room.id+"/sessions");
+    if(request!==mergeView.request)return;
+    const list=$("#merge-sessions");list.replaceChildren();
+    const labels={recording:"正在录制",requested:"等待分 P 转码",queued:"合并排队中",running:"正在合并",published:"验证后保存中",done:"合并完成",failed:"合并失败，请到队列重试",stopped:"已停止，请到队列重新排队",ready:"可手动合并"};
+    for(const session of data.items){
+      const row=node("div",null,"recording-file"),details=node("div",null,"recording-file-details");
+      const single=session.ended!=null && session.part_count<2 && !session.job_id;
+      const state=single ? (session.part_count ? "单个文件，无需合并" : "没有剩余的分 P") : (labels[session.status]||session.status);
+      details.append(node("strong",new Date(session.started*1000).toLocaleString()),node("small",session.part_count+" 个分 P · "+state));
+      if(session.skipped?.length)details.append(node("small","已跳过 "+session.skipped.length+" 个已删除分 P，合并结果包含缺段。","muted"));
+      if(session.error && !single)details.append(node("small",session.error,"muted"));
+      const merge=button("合并本场",()=>action(merge,async()=>{
+        if(!window.confirm("合并本场的 "+session.part_count+" 个分 P？验证成功后，将按录制设置保留或删除这些分 P。"))return;
+        const result=await api("/api/rooms/"+room.id+"/sessions/"+session.id+"/merge",{method:"POST",body:JSON.stringify({revision:session.revision})});
+        toast(result.message);await loadMerges();
+      },"#merge-error"));
+      merge.disabled=!session.can_merge;row.append(details,merge);list.append(row);
+    }
+    if(!data.items.length)list.append(node("p","暂无可合并的录制场次。新录制的分 P 会自动归入对应场次。","recordings-empty"));
+  }catch(error){if(request===mergeView.request)setText("#merge-error",error.message);}
+}
+$("#close-merges").addEventListener("click",()=>{$("#merge-dialog").close();mergeView.request++;mergeView.room=null;});
+$("#refresh-merges").addEventListener("click",()=>action($("#refresh-merges"),loadMerges,"#merge-error"));
 async function openRecordings(room) {
   stopPlayback();library.room=room;library.folder="";library.page=1;library.data=null;
   setText("#recordings-title",room.display_name+" · 录像文件夹");
@@ -256,6 +290,7 @@ function renderJobs(data) {
     selectCell.append(checkbox);tr.append(selectCell);
     const t=node("div",job.name,"cell-title");t.title=job.name;
     title.append(t,node("div",job.path,"cell-subtitle"));
+    if(job.operation==="merge")title.append(node("div","合并同场录像 · "+job.part_count+" 个分 P","cell-subtitle"));
     if(job.status==="queued" && job.queue_position){
       const order=node("div",null,"queue-order-actions");order.append(node("span","第 "+job.queue_position+" 项"));
       for(const [move,label] of [["top","置顶"],["up","上移"],["down","下移"],["bottom","置底"]]){
@@ -302,7 +337,7 @@ function renderJobs(data) {
   if(active){
     const phase=queueActions.control?.phase, paused=phase==="paused";
     $("#active-encoding").classList.toggle("is-paused",paused);
-    setText("#active-phase",paused ? "已暂停 · 进度保留" : phase==="verifying" ? "正在验证视频" : phase==="publishing" ? "正在保存视频" : "正在处理");
+    setText("#active-phase",paused ? "已暂停 · 进度保留" : phase==="verifying" ? "正在验证视频" : phase==="publishing" ? "正在保存视频" : active.operation==="merge" ? "正在合并同场分 P" : "正在处理");
     setText("#active-name",active.name);
     const p=ctx.snapshot?.progress, matches=p?.job_id===active.id;
     setText("#active-percent",matches && p.percent!==null ? p.percent+"%" : "读取中");
@@ -366,6 +401,7 @@ function openRoom(room=null) {
   form.elements.url.value=room?.url || "";form.elements.url.readOnly=false;
   form.elements.name.value=room?.name || "";form.elements.quality.value=room?.quality || ctx.snapshot?.default_quality || "原画";
   form.elements.use_proxy.checked=room?.uses_proxy || false;
+  form.elements.auto_merge.checked=room?.auto_merge!==false;
   setText("#room-dialog-title",room ? "编辑直播间" : "新增直播间");
   setText("#save-room",room ? "保存直播间" : "添加并开始监控");
   setText("#room-error","");
@@ -439,7 +475,7 @@ $("#room-form").addEventListener("submit",e=>{
   e.preventDefault();const f=e.currentTarget;
   action(e.submitter,async()=>{
     const data={url:f.elements.url.value,name:f.elements.name.value,quality:f.elements.quality.value,
-      proxy:f.elements.use_proxy.checked ? "shared" : "direct",revision:ctx.snapshot.revision};
+      proxy:f.elements.use_proxy.checked ? "shared" : "direct",auto_merge:f.elements.auto_merge.checked,revision:ctx.snapshot.revision};
     await api(f.dataset.id ? "/api/rooms/"+f.dataset.id : "/api/rooms",{method:f.dataset.id ? "PATCH" : "POST",body:JSON.stringify(data)});
     $("#room-dialog").close();toast(f.dataset.id ? "直播间已保存，下次检测时生效。" : "直播间已添加，采集器会自动开始检测。");await refresh();
   },"#room-error");
@@ -449,7 +485,7 @@ $("#settings-form").addEventListener("submit",e=>{
   e.preventDefault();const f=e.currentTarget;
   action(e.submitter,async()=>{
     const values={};
-    for(const key of ["segment_enabled","delete_original","h265"])values[key]=f.elements[key].checked;
+    for(const key of ["segment_enabled","delete_original","h265","merge_parts","delete_merged_parts"])values[key]=f.elements[key].checked;
     for(const key of ["segment_seconds","poll_seconds","qsv_quality"])values[key]=Number(f.elements[key].value);
     for(const key of ["record_format","quality","post_format"])values[key]=f.elements[key].value;
     const result=await api("/api/settings",{method:"PUT",body:JSON.stringify({values,revision:ctx.settingsRevision})});

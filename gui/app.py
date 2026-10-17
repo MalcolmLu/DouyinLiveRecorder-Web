@@ -15,6 +15,7 @@ from settings_service import ConfigService
 from repository import ConfigRepository, QueueRepository
 from services import DashboardService
 from recordings import RecordingsService
+from merge_service import MergeService
 from shared import AppError, Paths
 from platform_utils import source_root
 
@@ -33,6 +34,7 @@ def create_app(paths=None, testing=False, desktop=None):
     queue = QueueRepository(paths)
     dashboard = DashboardService(paths, config, queue)
     recordings = RecordingsService(paths, config)
+    merges = MergeService(paths, recordings)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
     allowed_hosts = set(filter(None, os.environ.get("GUI_ALLOWED_HOSTS", "").split(",")))
@@ -233,6 +235,15 @@ def create_app(paths=None, testing=False, desktop=None):
         path, mimetype = recordings.media(identifier, request.args.get("path", ""))
         return send_file(path, mimetype=mimetype, conditional=True, max_age=0,
                          as_attachment=request.args.get("download") == "1", download_name=path.name)
+
+    @app.get("/api/rooms/<identifier>/sessions")
+    def recording_sessions(identifier):
+        return jsonify(merges.list(identifier))
+
+    @app.post("/api/rooms/<identifier>/sessions/<session>/merge")
+    def merge_recording_session(identifier, session):
+        merges.request(identifier, session, body())
+        return jsonify(ok=True, message="已提交同场分 P 合并，分段全部转码成功后进入队列。")
 
     @app.post("/api/rooms")
     def create_room():

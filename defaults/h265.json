@@ -1,5 +1,7 @@
 {
   "enabled": true,
+  "merge_parts": true,
+  "delete_merged_parts": true,
   "crf": 24,
   "preset": "veryfast",
   "cpu_threads": 2,

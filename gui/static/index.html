@@ -69,7 +69,7 @@
           <div class="table-wrap" id="room-table-wrap" hidden>
             <table><thead><tr><th>直播间</th><th>状态</th><th>连接方式</th><th>录制画质</th><th>本次录制</th><th class="align-right">操作</th></tr></thead><tbody id="room-table"></tbody></table>
           </div>
-          <div class="workflow-note"><span class="workflow-tag">自动流程</span><p>每个分 P 录完 → 自动进入队列 → 核显转码 → 验证文件 → 按设置保留或删除原文件。<br><span class="muted">分段关闭并稳定后约 5–10 秒入队，直播录制继续；正在写入的分段等待录完。</span></p></div>
+          <div class="workflow-note"><span class="workflow-tag">自动流程</span><p>每个分 P 录完 → 自动进入队列 → 核显转码 → 验证文件 → 按设置保留或删除原文件。<br><span class="muted">分段关闭并稳定后约 5–10 秒入队；整场结束后默认自动合并。短暂断流重连会归入同场，直播录制继续。</span></p></div>
         </section>
 
         <section id="page-jobs" class="page" hidden>
@@ -123,6 +123,8 @@
               <label class="switch-row"><span>重新编码为 H.265<small>使用当前编码器；关闭则仅转封装。</small></span><input type="checkbox" name="h265" role="switch"></label>
               <label id="h265-quality-setting">H.265 质量参数<div class="unit-input"><input type="number" name="qsv_quality" min="1" max="51" required><span id="quality-unit">ICQ</span></div><small class="muted">1–51，越小画质越高。编码参数从下个转码任务开始生效，包含已排队任务。</small></label>
               <label class="switch-row"><span>转换成功后删除原文件<small>验证通过才删除；关闭时保留原件。MP4 原件保留时，输出另存为 .H265.mp4。</small></span><input type="checkbox" name="delete_original" role="switch"></label>
+              <label class="switch-row"><span>自动合并同场直播分 P<small>默认开启。整场结束、全部分 P 成功转为 H.265 后再等待 2 分钟，直接拼接为“_完整”录像；可在单个直播间中关闭。</small></span><input type="checkbox" name="merge_parts" role="switch" checked></label>
+              <label class="switch-row"><span>合并验证成功后删除分 P<small>自动和手动合并均适用；校验总时长、编码、音轨和全部数据包后才删除。</small></span><input type="checkbox" name="delete_merged_parts" role="switch" checked></label>
             </div></div>
             <p class="field-error" id="settings-error" role="alert"></p>
             <div class="form-footer"><span class="muted">已是 H.265 的视频会保留原编码，避免重复有损处理。</span><button class="primary" type="submit">保存录制设置</button></div>
@@ -182,9 +184,16 @@
       <label>备注名称<input name="name" maxlength="80" placeholder="选填，便于识别直播间" autocomplete="off"></label>
       <label>录制画质<select name="quality"><option>原画</option><option>蓝光</option><option>超清</option><option>高清</option><option>标清</option><option>流畅</option></select></label>
       <label class="switch-row"><span>使用共享代理<small id="room-proxy-hint">代理地址在“代理设置”中管理。</small></span><input name="use_proxy" type="checkbox" role="switch"></label>
+      <label class="switch-row"><span>自动合并本直播间的同场分 P<small>仅影响后续开始的录制；关闭后仍可通过“合并分 P”手动处理。</small></span><input name="auto_merge" type="checkbox" role="switch" checked></label>
       <p class="field-error" id="room-error" role="alert"></p>
       <div class="dialog-footer"><button type="button" id="cancel-room" class="secondary">取消</button><button type="submit" class="primary" id="save-room">添加并开始监控</button></div>
     </form>
+  </dialog>
+  <dialog id="merge-dialog" aria-labelledby="merge-title">
+    <div class="dialog-heading"><div><span class="eyebrow">RECORDING SESSIONS</span><h2 id="merge-title">合并同场分 P</h2></div><button id="close-merges" class="text-button">关闭</button></div>
+    <p class="muted">整场录制结束后可手动合并；等待各分 P 转码成功后自动进入队列。合并采用直接拼接，验证成功后按“录制设置”保留或删除分 P。</p>
+    <button id="refresh-merges" class="secondary small">刷新场次</button>
+    <p id="merge-error" class="field-error" role="alert"></p><div id="merge-sessions" class="recordings-list"></div>
   </dialog>
   <dialog id="recordings-dialog" aria-labelledby="recordings-title">
     <div class="dialog-heading"><div><span class="eyebrow">RECORDING LIBRARY</span><h2 id="recordings-title">录像文件夹</h2></div><button id="close-recordings" class="text-button">关闭</button></div>

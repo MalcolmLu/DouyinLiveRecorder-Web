@@ -8,6 +8,7 @@ import sqlite3
 import time
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import queue_control
+import merge_queue
 
 from platform_utils import recording_roots, recording_relative
 from shared import (
@@ -140,6 +141,7 @@ class QueueRepository:
                               " ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'published' THEN 1 WHEN 'queued' THEN 2 WHEN 'stopped' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END," + order +
                               "CASE WHEN status='queued' THEN created END,updated DESC,jobs.id LIMIT ? OFFSET ?",
                               [*params, page_size, (page - 1) * page_size]).fetchall()
+            merges = {r[0]: r[1] for r in db.execute("SELECT id,inputs FROM merge_jobs")} if merge_queue.has_schema(db) else {}
         items = []
         for r in rows:
             row = dict(r)
@@ -152,6 +154,8 @@ class QueueRepository:
                 "id": row["id"], "name": source.name, "path": relative, "status": row["status"],
                 "size": row["size"], "output_size": row["output_size"], "updated": row["updated"],
                 "error": sanitize_error(row["error"]), "created": row["created"],
+                "operation": "merge" if row["id"] in merges else "transcode",
+                "part_count": len(json.loads(merges[row["id"]])) if row["id"] in merges else None,
                 "queue_position": ranks.get(row["id"]), "queued_total": len(queued),
                 "saved_percent": round((1 - row["output_size"] / row["size"]) * 100, 1) if row["output_size"] and row["size"] else None,
             })
@@ -192,6 +196,23 @@ class QueueRepository:
                 raise AppError("找不到这个任务。", "not_found", 404)
             if row["status"] not in ("failed", "stopped"):
                 raise AppError("只能重新排队失败或已停止的任务。", "conflict", 409)
+            merged = merge_queue.merge_job(db, identifier)
+            if merged:
+                try:
+                    for part in json.loads(merged["inputs"]):
+                        path = Path(part["path"])
+                        recording_relative(path.resolve(), recording_roots(self.paths.config, self.paths.downloads))
+                        if path.exists() and merge_queue.file_snapshot(path, recording_roots(self.paths.config, self.paths.downloads)) != part:
+                            raise ValueError("changed")
+                    if sum(Path(part["path"]).is_file() for part in json.loads(merged["inputs"])) < 2:
+                        raise ValueError("fewer than two remaining parts")
+                    if Path(merged["destination"]).exists():
+                        raise ValueError("destination exists")
+                except (OSError, ValueError):
+                    raise AppError("分 P 已变化或完整录像已存在，请检查后再重试。", "source_changed", 409)
+                db.execute("UPDATE jobs SET status='queued',error=NULL,updated=? WHERE id=?", (time.time(), identifier))
+                queue_control.append_job(db, identifier)
+                return
             try:
                 source = Path(row["source"]).resolve(strict=True)
                 recording_relative(source, recording_roots(self.paths.config,self.paths.downloads))

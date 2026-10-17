@@ -178,6 +178,31 @@ p.worker()
             print("PASS pause freezes real FFmpeg, resume continues, stop reaps child and retains source byte-for-byte")
             print("PASS unfinished output removed, later jobs wait, stop persists after restart, resume skips stopped jobs")
 
+            _, home, downloads = setup("merge-controls")
+            originals = {}
+            for name in ("merge-first.ts", "merge-second.ts"):
+                source = downloads / name; source.write_bytes(seed.read_bytes())
+                originals[source] = hashlib.sha256(source.read_bytes()).hexdigest()
+            with processor.connect() as connection:
+                processor.merge_queue.migrate(connection)
+                identifier = processor.merge_queue.enqueue_merge(connection,
+                    {"id": "a" * 64, "parts": json.dumps([{"source": str(path)} for path in originals])},
+                    [processor.merge_queue.file_snapshot(path, [downloads]) for path in originals], True)
+                connection.execute("UPDATE queue_control SET mode='paused'")
+            worker = start(home, downloads, True)
+            wait(lambda: state(home)["phase"] == "paused", "merge initial queue pause")
+            command(home, "resume"); progress = home / "progress.txt"
+            wait(lambda: state(home)["phase"] == "encoding" and progress.exists() and "progress=" in progress.read_text(), "merge FFmpeg progress")
+            command(home, "pause"); wait(lambda: state(home)["phase"] == "paused", "merge suspension")
+            frozen = progress.read_bytes(); time.sleep(.6)
+            assert progress.read_bytes() == frozen
+            command(home, "stop")
+            wait(lambda: status(home, identifier) == "stopped", "merge stop")
+            assert originals == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in originals}
+            assert not list(downloads.glob(".*.tmp.*"))
+            stop_worker(worker)
+            print("PASS real merge pauses and stops through queue controls; every part retained and incomplete merge removed")
+
             _, home, downloads = setup("live-segments")
             state_dir = home.parent / "gui/state"; state_dir.mkdir(parents=True)
             (home.parent / "config.ini").write_text("[录制设置]\n录制完成后自动转为mp4格式 = 是\n追加格式后删除原文件 = 否\n", encoding="utf-8")

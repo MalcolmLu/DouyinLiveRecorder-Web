@@ -42,6 +42,11 @@ function page(desktop,rooms=[],jobs=[]){
       data=options.method==="PUT"?{ok:true,message:"已保存"}:
         {values,revision:"desktop-revision",status:snapshot.desktop,encoders:[{value:"libx265",label:"CPU"},{value:"hevc_videotoolbox",label:"Apple VideoToolbox"}],
           data_dir:"/example/data",ffmpeg_path:"/example/tools/ffmpeg"};
+    }else if(url.endsWith("/sessions")){
+      data={items:[{id:"e".repeat(64),name:"测试主播",started:1750000000,ended:1750003600,part_count:3,auto_merge:false,
+        status:jobState.mergeRequested?"requested":"ready",can_merge:!jobState.mergeRequested,revision:"merge-revision",skipped:["deleted.ts"]}]};
+    }else if(url.endsWith("/merge")){
+      jobState.mergeRequested=true;data={ok:true,message:"合并已提交"};
     }else if(url.includes("/recordings?")){
       const folder=new URL(url,w.location.href).searchParams.get("folder") || "0/B站直播/测试主播";
       const child=folder.endsWith("/2026-10-10");
@@ -337,5 +342,25 @@ test("stopped task exposes a direct delete button that preserves media and authe
     const request=calls.find(call=>call.url==="/api/jobs/"+stopped.id);
     assert.equal(request.options.method,"DELETE");assert.equal(request.options.headers["X-CSRF-Token"],"isolated-ui-csrf");
     assert.equal(jobState.items[0].status,"queued");
+  }finally{dom.window.close();}
+});
+test("room exception keeps manual merge available and submits session revision with CSRF",async()=>{
+  const room={id:"merge-room",name:"测试主播",display_name:"测试主播",url:"https://live.bilibili.com/100001",platform:"哔哩哔哩",quality:"原画",enabled:true,state:"offline",auto_merge:false};
+  const {dom,w,calls}=page(false,[room]);
+  try{
+    await waitFor(()=>w.document.querySelector(".room-merge"));
+    w.document.querySelector(".room-merge").click();
+    await waitFor(()=>w.document.querySelector("#merge-sessions button"));
+    assert.equal(w.document.querySelector("#merge-dialog").open,true);
+    assert.match(w.document.querySelector("#merge-sessions").textContent,/已跳过 1 个已删除/);
+    w.document.querySelector("#merge-sessions button").click();
+    await waitFor(()=>calls.some(call=>call.url.endsWith("/merge")));
+    const request=calls.find(call=>call.url.endsWith("/merge"));
+    assert.equal(request.options.method,"POST");assert.equal(request.options.headers["X-CSRF-Token"],"isolated-ui-csrf");
+    assert.equal(JSON.parse(request.options.body).revision,"merge-revision");
+    w.document.querySelector("#close-merges").click();
+    const edit=[...w.document.querySelectorAll("#room-table button")].find(button=>button.textContent==="编辑");edit.click();
+    assert.equal(w.document.querySelector("#room-form").elements.auto_merge.checked,false);
+    assert.equal(w.document.querySelector("#settings-form").elements.merge_parts.checked,true);
   }finally{dom.window.close();}
 });

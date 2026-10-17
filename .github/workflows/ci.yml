@@ -44,4 +44,5 @@ jobs:
           --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-trixie .
       - run: docker run --rm dlr-web:test python h265/selftest.py
       - run: docker run --rm dlr-web:test python h265/queue_selftest.py
+      - run: docker run --rm dlr-web:test python h265/merge_selftest.py
       - run: python scripts/container_smoke.py dlr-web:test
