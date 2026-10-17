@@ -314,7 +314,7 @@ def unchanged(file, job):
     return stat.st_size == job['size'] and stat.st_mtime_ns == job['mtime']
 
 
-def encode(job):
+def encode(job, *, destination_override=None, preserve_streams=False, verify_output=None):
     with connect() as db:
         record = merge_queue.merge_job(db, job['id'])
     if record:
@@ -328,12 +328,18 @@ def encode(job):
         raise ValueError('Source is still open; original retained')
     cfg = settings()
     destination = source.with_suffix('.mp4')
+    if destination_override is not None:
+        destination = Path(destination_override)
+        if destination.parent.resolve() != source.parent or destination.suffix.lower() not in ('.mp4', '.mkv'):
+            raise ValueError('Output must be an MP4 or MKV beside the source')
+        if destination.is_symlink():
+            raise ValueError('Output is a symbolic link; original retained')
     if source == destination and not job['delete_source']:
         suffix = '.H265.mp4' if cfg['enabled'] else '.converted.mp4'
         destination = source.with_name(source.stem + suffix)
     if destination != source and destination.exists():
         raise FileExistsError('MP4 already exists; both files retained')
-    temporary = source.parent / ('.' + source.stem + '.h265-' + job['id'][:12] + '.tmp.mp4')
+    temporary = source.parent / ('.' + source.stem + '.h265-' + job['id'][:12] + '.tmp' + destination.suffix)
     if temporary.exists():
         temporary.unlink()  # Only this job's incomplete, unpublished temporary output.
     original_duration, video, audio_count = probe(source)
@@ -358,8 +364,9 @@ def encode(job):
         else:
             cmd += ['-init_hw_device', f'vaapi=va:{device}',
                     '-init_hw_device', 'qsv=qs@va', '-filter_hw_device', 'qs']
-    cmd += ['-i', str(source), '-map', '0:v:0', '-map', '0:a?',
-           '-map_metadata', '0', '-c:v', mode, '-c:a', 'copy', '-fps_mode', 'passthrough']
+    cmd += ['-i', str(source)]
+    cmd += ['-map', '0', '-c', 'copy'] if preserve_streams else ['-map', '0:v:0', '-map', '0:a?']
+    cmd += ['-map_metadata', '0', '-c:v', mode, '-c:a', 'copy', '-fps_mode', 'passthrough']
     if mode == 'libx265':
         cmd += ['-preset', cfg['preset'], '-crf', str(cfg['crf']), '-x265-params',
                 f"pools={cfg['cpu_threads']}:frame-threads=1:log-level=error"]
@@ -381,9 +388,12 @@ def encode(job):
     elif mode == 'hevc_amf':
         cmd += ['-quality','balanced','-rc','cqp','-qp_i',str(cfg['qsv_quality']),
                 '-qp_p',str(cfg['qsv_quality']),'-pix_fmt','yuv420p']
-    if expected_codec == 'hevc':
+    if expected_codec == 'hevc' and destination.suffix.lower() == '.mp4':
         cmd += ['-tag:v', 'hvc1']
-    cmd += ['-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', str(temporary)]
+    cmd += ['-avoid_negative_ts', 'make_zero']
+    if destination.suffix.lower() == '.mp4':
+        cmd += ['-movflags', '+faststart']
+    cmd += [str(temporary)]
     write_progress = {'job_id': job['id'], 'duration': original_duration,
                       'started_at': time.time(), 'encoder': mode}
     progress_state = HOME / 'current-job.json'
@@ -421,6 +431,8 @@ def encode(job):
         if output_audio_count != audio_count:
             raise ValueError('Audio stream count changed')
         verify_duration(source, temporary, original_duration, duration)
+        if verify_output is not None:
+            verify_output(source, temporary)
         if not unchanged(source, job) or opened_by_ffmpeg(source):
             raise ValueError('Source became active or changed; original retained')
         if destination != source and destination.exists():
@@ -429,7 +441,12 @@ def encode(job):
         with temporary.open('rb+') as stream:
             os.fsync(stream.fileno())
         with publication() as db:
-            os.replace(temporary, destination)
+            if destination_override is not None and destination != source:
+                # Batch imports may share a folder with unrelated existing files.
+                os.link(temporary, destination)
+                temporary.unlink()
+            else:
+                os.replace(temporary, destination)
             sync_directory(destination.parent)
             published_stat = destination.stat()
             db.execute("UPDATE jobs SET status='published',output=?,output_size=?,output_mtime=?,updated=? WHERE id=?",

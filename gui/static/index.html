@@ -105,6 +105,15 @@
           </div>
           <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
           <p class="muted footnote">排序会改变实际转码顺序，正在处理的任务不换位。暂停后可继续当前进度；停止会中止当前任务并暂停队列，已停止的任务可重新排队，从头转码。删除记录会保留录像文件。</p>
+          <section id="library-queue" class="library-queue" hidden aria-labelledby="library-heading">
+            <div class="dialog-heading"><div><span class="eyebrow">BACKGROUND ENCODING</span><h2 id="library-heading">历史录像后台转码</h2></div><span class="pill" id="library-state" role="status" aria-live="polite">读取中</span></div>
+            <p class="muted">直播转码和分 P 合并优先；有直播任务时，后台转码自动暂停并保留进度，空闲后继续。验证 H.265、音轨、完整性成功后删除源文件；失败保留源文件并记录原因。</p>
+            <div class="queue-summary" id="library-summary"></div>
+            <div class="toolbar"><label class="sr-only" for="library-filter">后台任务状态</label><select id="library-filter"><option value="all">全部后台任务</option><option value="queued">排队中</option><option value="running">处理中</option><option value="failed">失败</option><option value="stopped">已停止</option><option value="done">已完成</option></select><label class="sr-only" for="library-search">搜索历史录像</label><input id="library-search" type="search" maxlength="100" placeholder="搜索历史录像"><div class="actions"><button id="library-pause" class="secondary small" disabled>暂停后台转码</button><button id="library-resume" class="secondary small" disabled>继续后台转码</button><button id="library-stop" class="secondary small danger-button" disabled>停止后台转码</button></div></div>
+            <p id="library-detail" class="muted" role="status"></p>
+            <div class="table-wrap"><table><thead><tr><th>历史录像</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th class="align-right">操作</th></tr></thead><tbody id="library-table"></tbody></table></div>
+            <div class="pagination"><span id="library-page-label" class="muted"></span><div><button id="library-previous" class="secondary small">上一页</button><button id="library-next" class="secondary small">下一页</button></div></div>
+          </section>
         </section>
 
         <section id="page-settings" class="page" hidden>

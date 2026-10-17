@@ -84,6 +84,14 @@ YouTube 支持频道主页、`/live`、`/streams`、`watch?v=...` 和短链接�
 
 源码 `gui/` 和 `h265/` 随镜像部署，运行数据与源码分开；升级源码并重新构建不会自动替换已有配置。请备份整个 `data/`，其中包含代理、Cookie 和登录状态等私人信息，勿上传到公开仓库。
 
+## 历史录像后台转码
+
+可选的历史录像后台转码使用独立容器和 `config/library/h265/queue.sqlite3`。首次通过 `gui/library_worker.py --seed --root /app/library` 导入指定挂载目录的现有视频，再启动 `--worker`；导入仅执行一次，小文件优先，后续新增文件不会自动加入。字幕、封面、弹幕等非视频文件保留，已是 HEVC 的视频不重复编码。含字幕或附件的视频使用 MKV 保留全部轨道，普通录像保存为 MP4；已有同名输出会另取文件名，避免覆盖。
+
+后台进程在直播队列有转码、分 P 合并、暂停或未连接时让出资源；正在执行的 FFmpeg / FFprobe 暂停并保留进度，直播队列空闲后接续。输出须通过编码、尺寸、全部轨道包数、时长和完整解码验证后才替换 / 删除源文件；失败原因保存在控制台的“历史录像后台转码”区和 `config/library/h265/postprocess.log`，可重试。部署时只为独立后台容器挂载需要处理的目录，无需扩大网页容器的文件访问范围。
+
+在 `.env` 设置 `LIBRARY_DIR` 为要处理的宿主机目录，主转码服务运行正常后，执行 `docker compose --profile library run --rm library python /app/gui/library_worker.py --seed` 导入，再执行 `docker compose --profile library up -d --no-deps library` 启动。导入会启用 H.265，并采用当前主队列的编码器 / 画质设置。可选的 `config/library/h265/prerequisites.json` 形如 `{"sessions":["合并会话的64位十六进制ID"]}`，用于让一批指定的历史分 P 全部合并完成后再开始后台工作；未完成时控制台显示等待状态。
+
 ## 测试
 
 ~~~sh
@@ -96,6 +104,8 @@ PYTHONPATH=gui python -m unittest discover -s tests -v
 python h265/selftest.py
 # 使用隔离的测试视频验证实际排序、暂停、停止及原录像保留。
 python h265/queue_selftest.py
+python h265/merge_selftest.py
+python h265/library_selftest.py
 # 仅在具有核显映射的 Linux 机器上验证实际 QSV。
 python h265/selftest.py --hardware
 ~~~

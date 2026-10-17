@@ -17,6 +17,25 @@ x-common: &common
       max-file: "3"
 
 services:
+  library:
+    <<: *common
+    profiles: [library]
+    container_name: douyin-live-recorder-web-library
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    tmpfs:
+      - /tmp:size=256m
+    mem_limit: 1536m
+    devices:
+      - "${GPU_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128:rw"
+    volumes:
+      - ./data/config/library:/app/config/library
+      - ./data/config/h265:/app/config/h265:ro
+      - "${LIBRARY_DIR:-./data/library}:/app/library"
+    command: ["python", "-u", "/app/gui/library_worker.py", "--worker"]
+
   recorder:
     <<: *common
     container_name: douyin-live-recorder-web-recorder

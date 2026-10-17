@@ -373,7 +373,75 @@ async function loadJobs() {
   }
   if(request!==jobSelection.request)return;
   renderJobs(data);
+  await loadLibraryQueue();
 }
+const historicalQueue={page:1,data:null,request:0,busy:false};
+async function loadLibraryQueue(){
+  const request=++historicalQueue.request;
+  const params=new URLSearchParams({status:$('#library-filter').value,search:$('#library-search').value,page:String(historicalQueue.page)});
+  const data=await api('/api/library/jobs?'+params);
+  if(request!==historicalQueue.request)return;
+  historicalQueue.data=data;$('#library-queue').hidden=!data.enabled;
+  if(!data.enabled)return;
+  const control=data.control || {}, ready=control.online && control.supported, mode=control.mode || 'running';
+  const labels={waiting_prerequisites:'等待先前的分 P 合并完成',waiting_priority:'等待直播队列空闲',idle:'等待后台任务',encoding:'正在后台转码',preparing:'准备后台转码',verifying:'正在验证完整性',publishing:'正在保存视频',finalizing:'正在完成收尾',paused:'后台转码已暂停',stopped:'后台转码已停止',offline:'后台进程未连接'};
+  setText('#library-state',labels[control.phase] || '正在连接后台进程');
+  setText('#library-heading',data.label+' · 后台转码');
+  $('#library-pause').disabled=historicalQueue.busy || !ready || mode!=='running';
+  $('#library-resume').disabled=historicalQueue.busy || !ready || mode==='running' || control.state==='stopping';
+  $('#library-stop').disabled=historicalQueue.busy || !ready || mode==='stopped';
+  const summary=$('#library-summary');summary.replaceChildren();
+  for(const [key,label] of [['running','处理中'],['queued','排队中'],['done','已完成'],['failed','失败'],['stopped','已停止']]){
+    const element=node('span',label);element.append(node('strong',data.summary[key] || 0));summary.append(element);
+  }
+  setText('#library-detail','已是 H.265 的 '+data.already_hevc+' 个文件保留原文件；'+data.sidecars_retained+' 个非视频文件保留。失败原因同时写入 '+data.log+'。');
+  const body=$('#library-table');body.replaceChildren();
+  for(const job of data.items){
+    const row=node('tr'), title=node('td');row.dataset.libraryJobId=job.id;
+    title.append(node('div',job.name,'cell-title'),node('div',job.path,'cell-subtitle'));
+    const status=node('td');
+    const suspended=job.status==='running' && ['waiting_priority','waiting_prerequisites','paused'].includes(control.phase);
+    status.append(badge(suspended?'paused':job.status));
+    if(suspended)status.append(node('div',control.phase!=='paused'?'优先处理直播任务，进度保留':'进度保留','cell-subtitle'));
+    if(job.already_hevc)status.append(node('div','原文件已是 H.265','cell-subtitle'));
+    if(job.retry_requested)status.append(node('div','等待检查并重新排队','cell-subtitle'));
+    if(job.status==='running' && data.progress?.job_id===job.id && data.progress.percent!==null){
+      const progress=node('progress');progress.max=100;progress.value=data.progress.percent;
+      progress.setAttribute('aria-label','历史录像已转码 '+data.progress.percent+'%');
+      status.append(progress,node('div',data.progress.percent+'%','cell-subtitle'));
+    }
+    const actions=node('div',null,'actions'), cell=node('td',null,'align-right');
+    if(job.status==='failed')actions.append(button('查看原因',()=>{setText('#error-detail',job.error || '没有记录到详细错误。');$('#error-dialog').showModal();}));
+    if(['failed','stopped'].includes(job.status)){
+      const retry=button('重试',()=>action(retry,async()=>{const result=await api('/api/library/jobs/'+job.id+'/retry',{method:'POST',body:'{}'});toast(result.message);await loadLibraryQueue();}));
+      retry.disabled=historicalQueue.busy || job.retry_requested;actions.append(retry);
+    }
+    if(['done','failed','stopped'].includes(job.status)){
+      const remove=button('删除记录',()=>action(remove,async()=>{
+        if(!window.confirm('删除“'+job.name+'”的后台转码记录？视频文件保留。'))return;
+        const result=await api('/api/library/jobs/'+job.id,{method:'DELETE'});toast(result.message);await loadLibraryQueue();
+      }));remove.disabled=historicalQueue.busy || job.retry_requested;actions.append(remove);
+    }
+    cell.append(actions);row.append(title,status,node('td',bytes(job.size)),node('td',bytes(job.output_size)),cell);body.append(row);
+  }
+  if(!data.items.length){const row=node('tr'),cell=node('td','当前筛选下没有后台任务。','muted');cell.colSpan=5;row.append(cell);body.append(row);}
+  setText('#library-page-label',data.total+' 个任务 · 第 '+data.page+' 页 / 共 '+Math.max(1,Math.ceil(data.total/data.page_size))+' 页');
+  $('#library-previous').disabled=data.page<=1;$('#library-next').disabled=data.page*data.page_size>=data.total;
+}
+for(const actionName of ['pause','resume','stop'])$('#library-'+actionName).addEventListener('click',async()=>{
+  if(historicalQueue.busy || !historicalQueue.data?.control)return;
+  if(actionName==='stop' && !window.confirm('停止当前后台转码并暂停后台队列？源文件保留；已停止任务重试时从头转码。直播队列继续工作。'))return;
+  historicalQueue.busy=true;
+  try{
+    const control=historicalQueue.data.control;
+    const result=await api('/api/library/control',{method:'POST',body:JSON.stringify({action:actionName,revision:control.control_revision,current_job_id:control.current_job_id})});toast(result.message);
+  }catch(e){toast(e.message);}finally{historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));}
+});
+$('#library-filter').addEventListener('change',()=>{historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));});
+let librarySearchTimer;
+$('#library-search').addEventListener('input',()=>{historicalQueue.request++;clearTimeout(librarySearchTimer);librarySearchTimer=setTimeout(()=>{historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));},350);});
+$('#library-previous').addEventListener('click',()=>{historicalQueue.page--;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-next').addEventListener('click',()=>{historicalQueue.page++;loadLibraryQueue().catch(e=>globalError(e.message));});
 async function refresh() {
   if(!ctx.csrf || ctx.busy) return;
   ctx.busy=true;

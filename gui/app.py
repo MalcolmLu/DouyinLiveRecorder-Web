@@ -16,6 +16,7 @@ from repository import ConfigRepository, QueueRepository
 from services import DashboardService
 from recordings import RecordingsService
 from merge_service import MergeService
+from library_repository import LibraryRepository
 from shared import AppError, Paths
 from platform_utils import source_root
 
@@ -35,6 +36,7 @@ def create_app(paths=None, testing=False, desktop=None):
     dashboard = DashboardService(paths, config, queue)
     recordings = RecordingsService(paths, config)
     merges = MergeService(paths, recordings)
+    library_queue = LibraryRepository(paths)
     app.extensions["recorder_web"] = {"auth": auth, "auth_repo": auth_repo, "config": config,
                                      "queue": queue, "dashboard": dashboard, "paths": paths}
     allowed_hosts = set(filter(None, os.environ.get("GUI_ALLOWED_HOSTS", "").split(",")))
@@ -187,6 +189,34 @@ def create_app(paths=None, testing=False, desktop=None):
         if status not in ("all", "queued", "running", "published", "done", "failed", "stopped") or len(search) > 100 or not 1 <= page <= 10000:
             raise AppError("筛选条件不正确。")
         return jsonify(queue.jobs(status, search, page))
+
+    @app.get('/api/library/jobs')
+    def library_jobs():
+        status = request.args.get('status', 'all')
+        search = request.args.get('search', '').strip()
+        try:
+            page = int(request.args.get('page', '1'))
+        except ValueError:
+            raise AppError('页码不正确。')
+        if status not in ('all', 'queued', 'running', 'published', 'done', 'failed', 'stopped') or len(search) > 100 or not 1 <= page <= 10000:
+            raise AppError('筛选条件不正确。')
+        return jsonify(library_queue.snapshot(status, search, page))
+
+    @app.post('/api/library/control')
+    def library_control():
+        data = body()
+        state = library_queue.change_control(data.get('action'), data.get('revision'), data.get('current_job_id'))
+        return jsonify(ok=True, control=state, message='后台转码控制指令已提交。直播队列仍拥有最高优先级。')
+
+    @app.post('/api/library/jobs/<identifier>/retry')
+    def library_retry(identifier):
+        library_queue.retry(identifier)
+        return jsonify(ok=True, message='已提交重试，后台进程会检查源文件后重新排队。')
+
+    @app.delete('/api/library/jobs/<identifier>')
+    def library_delete(identifier):
+        library_queue.delete_record(identifier)
+        return jsonify(ok=True, message='后台转码记录已删除，视频文件已保留。')
 
     @app.post("/api/queue/control")
     def control_queue():

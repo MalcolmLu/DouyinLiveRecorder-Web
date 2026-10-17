@@ -78,6 +78,18 @@ function page(desktop,rooms=[],jobs=[]){
       let index=0;jobState.items=jobState.items.map(job=>job.status==="queued"?queued[index++]:job);
       jobState.control.order_revision++;
       data={ok:true,control:jobState.control,message:"实际转码顺序已更新"};
+    }else if(url.startsWith('/api/library/jobs?')){
+      data=jobState.library || {enabled:false};
+    }else if(url==='/api/library/control'){
+      const request=JSON.parse(options.body),control=jobState.library.control;
+      control.mode={pause:'paused',resume:'running',stop:'stopped'}[request.action];
+      control.state=control.phase=request.action==='resume'?'waiting_priority':control.mode;
+      control.control_revision++;
+      data={ok:true,control,message:'后台控制已提交'};
+    }else if(url.endsWith('/retry') && url.startsWith('/api/library/jobs/')){
+      jobState.library.items[0].retry_requested=true;data={ok:true,message:'已提交重试'};
+    }else if(url.startsWith('/api/library/jobs/') && options.method==='DELETE'){
+      jobState.library.items=[];jobState.library.total=0;data={ok:true,message:'记录已删除，视频保留'};
     }else if(url==="/api/jobs/delete-records"){
       if(jobState.failBulk)return {ok:false,status:409,json:async()=>({error:{code:"conflict",message:"任务已重新排队，请刷新后重试。"}})};
       const ids=JSON.parse(options.body).ids;
@@ -362,5 +374,37 @@ test("room exception keeps manual merge available and submits session revision w
     const edit=[...w.document.querySelectorAll("#room-table button")].find(button=>button.textContent==="编辑");edit.click();
     assert.equal(w.document.querySelector("#room-form").elements.auto_merge.checked,false);
     assert.equal(w.document.querySelector("#settings-form").elements.merge_parts.checked,true);
+  }finally{dom.window.close();}
+});
+
+test('historical queue shows priority suspension, safe filenames, failure reasons and authenticated independent controls',async()=>{
+  const {dom,w,calls,jobState}=page(false);
+  try{
+    await waitFor(()=>calls.some(c=>c.url==='/api/dashboard'));
+    const job={id:'9'.repeat(64),name:'<img src=x onerror=alert(1)>.mp4',path:'历史录像/<video>.mp4',status:'running',size:2048,output_size:null,error:null,already_hevc:false,retry_requested:false};
+    jobState.library={enabled:true,label:'录播姬历史录像',items:[job],total:1,page:1,page_size:25,
+      summary:{running:1,queued:3,done:2,failed:0},already_hevc:1,sidecars_retained:1,log:'library/h265/postprocess.log',
+      progress:{job_id:job.id,percent:35.2},control:{supported:true,online:true,mode:'running',phase:'waiting_priority',state:'waiting_priority',current_job_id:job.id,control_revision:0}};
+    w.document.querySelector('[data-page="jobs"]').click();
+    await waitFor(()=>!w.document.querySelector('#library-queue').hidden);
+    assert.match(w.document.querySelector('#library-state').textContent,/等待直播队列空闲/);
+    assert.match(w.document.querySelector('#library-table').textContent,/进度保留/);
+    assert.equal(w.document.querySelector('#library-table img'),null);
+    assert.equal(w.document.querySelector('#library-table progress').value,35.2);
+    w.document.querySelector('#library-pause').click();
+    await waitFor(()=>w.document.querySelector('#library-state').textContent==='后台转码已暂停');
+    w.document.querySelector('#library-resume').click();
+    await waitFor(()=>w.document.querySelector('#library-state').textContent==='等待直播队列空闲');
+    const commands=calls.filter(c=>c.url==='/api/library/control');assert.equal(commands.length,2);
+    assert.equal(commands[0].options.headers['X-CSRF-Token'],'isolated-ui-csrf');
+    assert.equal(calls.some(c=>c.url==='/api/queue/control'),false);
+    job.status='failed';job.error='FFprobe failed: moov atom not found';
+    w.document.querySelector('#refresh-jobs').click();
+    await waitFor(()=>[...w.document.querySelectorAll('#library-table button')].some(b=>b.textContent==='查看原因'));
+    [...w.document.querySelectorAll('#library-table button')].find(b=>b.textContent==='查看原因').click();
+    assert.match(w.document.querySelector('#error-detail').textContent,/moov atom not found/);
+    [...w.document.querySelectorAll('#library-table button')].find(b=>b.textContent==='重试').click();
+    await waitFor(()=>job.retry_requested);
+    assert.equal(calls.find(c=>c.url.endsWith('/library/jobs/'+job.id+'/retry')).options.headers['X-CSRF-Token'],'isolated-ui-csrf');
   }finally{dom.window.close();}
 });
