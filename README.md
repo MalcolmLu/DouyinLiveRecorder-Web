@@ -90,6 +90,8 @@ YouTube 支持频道主页、`/live`、`/streams`、`watch?v=...` 和短链接�
 
 后台进程在直播队列有转码、分 P 合并、暂停或未连接时让出资源；正在执行的 FFmpeg / FFprobe 暂停并保留进度，直播队列空闲后接续。输出须通过编码、尺寸、全部轨道包数、时长和完整解码验证后才替换 / 删除源文件；失败原因保存在控制台的“历史录像后台转码”区和 `config/library/h265/postprocess.log`，可重试。部署时只为独立后台容器挂载需要处理的目录，无需扩大网页容器的文件访问范围。
 
+大文件时间戳校验的临时副本存放在 `config/library/h265/tmp/`，该配置挂载盘需有足够磁盘空间。主队列使用持久的只读 SQLite 连接，保持 WAL 协调文件可用；状态读取失败时后台会等待并记入日志。
+
 在 `.env` 设置 `LIBRARY_DIR` 为要处理的宿主机目录，主转码服务运行正常后，执行 `docker compose --profile library run --rm library python /app/gui/library_worker.py --seed` 导入，再执行 `docker compose --profile library up -d --no-deps library` 启动。导入会启用 H.265，并采用当前主队列的编码器 / 画质设置。可选的 `config/library/h265/prerequisites.json` 形如 `{"sessions":["合并会话的64位十六进制ID"]}`，用于让一批指定的历史分 P 全部合并完成后再开始后台工作；未完成时控制台显示等待状态。
 
 ## 测试

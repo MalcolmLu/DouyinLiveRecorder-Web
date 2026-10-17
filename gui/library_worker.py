@@ -17,6 +17,8 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import uuid
 
@@ -35,13 +37,40 @@ class PriorityGate:
                 not isinstance(value,str) or not re.fullmatch(r'[0-9a-f]{64}',value) for value in required_sessions):
             raise ValueError('Invalid prerequisite merge sessions')
         self.required_sessions = list(dict.fromkeys(required_sessions))
+        self.connection = None
+        self.lock = threading.Lock()
+        self.last_warning = 0
 
     def reason(self):
+        with self.lock:
+            return self._reason()
+
+    def close(self):
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def __del__(self):
         try:
-            with sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True, timeout=.2) as db:
+            self.close()
+        except Exception:
+            pass
+
+    def _reason(self):
+        try:
+            if self.connection is None:
+                self.connection = sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True,
+                                                   timeout=.2, isolation_level=None, check_same_thread=False)
+                self.connection.execute('PRAGMA query_only=ON')
+            db = self.connection
+            # Keep a read-only WAL client open so SQLite's coordination files
+            # remain available through a read-only Docker bind mount. Each
+            # SELECT is autocommitted and observes the latest primary state.
+            if db is not None:
                 db.row_factory = sqlite3.Row
                 state = queue_control.snapshot(db)
                 if not state['online'] or state['phase'] == 'maintenance':
+                    self.close()
                     return 'primary_unavailable'
                 if state['mode'] != 'running':
                     return 'primary_paused'
@@ -57,8 +86,12 @@ class PriorityGate:
                     if completed!=len(self.required_sessions):
                         return 'primary_prerequisites'
             return None
-        except (OSError, sqlite3.Error, KeyError):
+        except (OSError, sqlite3.Error, KeyError) as exc:
             # Missing/stale primary state never permits competing GPU work.
+            self.close()
+            if time.monotonic() - self.last_warning > 60:
+                LOG.warning('Primary queue read unavailable: %s; background work waits', exc)
+                self.last_warning = time.monotonic()
             return 'primary_unavailable'
 
 
@@ -284,6 +317,12 @@ def retry_requested(p):
 def worker(p, primary):
     migrate(p)
     p.HOME.mkdir(parents=True, exist_ok=True)
+    scratch = p.HOME / 'tmp'
+    scratch.mkdir(exist_ok=True)
+    # A timestamp-normalization reference can be as large as the original
+    # recording. Keep it on the NAS volume rather than the container tmpfs.
+    os.environ['TMPDIR'] = str(scratch)
+    tempfile.tempdir = None
     with (p.HOME / 'worker.lock').open('a') as lock:
         try:
             acquire_lock(lock, blocking=False)
@@ -303,7 +342,7 @@ def worker(p, primary):
             if state['mode'] == 'stopped' and state['stop_job_id']:
                 db.execute("UPDATE jobs SET status='stopped' WHERE status='running' AND id=?", (state['stop_job_id'],))
             db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
-        LOG.info('Library worker ready; recorder transcodes and merges have highest priority')
+        LOG.info('Library worker ready; recorder transcodes and merges have highest priority; scratch=%s', tempfile.gettempdir())
         try:
             while not stopped[0]:
                 retry_requested(p)
@@ -351,6 +390,7 @@ def worker(p, primary):
                 finally:
                     p.JOB_CONTROL = None
         finally:
+            gate.close()
             with p.connect() as db:
                 queue_control.runtime(db, token, 'offline')
             LOG.removeHandler(handler); handler.close()
