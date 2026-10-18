@@ -39,7 +39,9 @@ def main():
     controls = processor.queue_control
     children = []
     with tempfile.TemporaryDirectory(prefix="dlr-queue-ffmpeg-test-") as directory:
-        root = Path(directory)
+        # macOS reports open descriptors under /private/var even when tempfile
+        # returns the /var alias. Compare canonical paths on every platform.
+        root = Path(directory).resolve()
         seed = root / "seed.ts"
         subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-n", "-f", "lavfi",
                         "-i", "testsrc2=size=160x90:rate=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
@@ -230,19 +232,25 @@ p.worker()
                 with db(home) as connection:
                     done = connection.execute("SELECT count(*) FROM jobs WHERE status='done'").fetchone()[0]
                 if done:
-                    converted_during_recording = True
                     if Path("/proc").is_dir():
                         opened = set()
                         for descriptor in Path("/proc").joinpath(str(recorder.pid), "fd").iterdir():
                             try:
-                                opened.add(Path(os.readlink(descriptor)))
+                                opened.add(os.path.normcase(str(Path(os.readlink(descriptor)).resolve())))
                             except OSError:
                                 pass
                     else:
                         import psutil
-                        opened = {Path(item.path) for item in psutil.Process(recorder.pid).open_files()}
-                    active = [file for file in downloads.glob("*.ts") if file in opened]
-                    assert active, "Recording should still have an open part"
+                        opened = {os.path.normcase(str(Path(item.path).resolve()))
+                                  for item in psutil.Process(recorder.pid).open_files()}
+                    active = [file for file in downloads.glob("*.ts")
+                              if os.path.normcase(str(file.resolve())) in opened]
+                    if not active:
+                        # A segment can close between enumerating the process
+                        # and its descriptors. Require an observed open part.
+                        time.sleep(.05)
+                        continue
+                    converted_during_recording = True
                     with db(home) as connection:
                         for file in active:
                             assert not connection.execute("SELECT 1 FROM jobs WHERE source=?", (str(file),)).fetchone(), "Open recording part was queued"
