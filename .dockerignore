@@ -16,3 +16,7 @@ __pycache__
 .venv
 *.tar.gz
 *.zip
+desktop
+node_modules
+dist
+build

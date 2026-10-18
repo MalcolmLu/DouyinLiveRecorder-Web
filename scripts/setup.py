@@ -1,6 +1,5 @@
 """Initialize fresh persistent data without replacing existing configuration."""
 import argparse
-import fcntl
 import ipaddress
 import os
 from pathlib import Path
@@ -8,15 +7,16 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(getattr(sys,"_MEIPASS",Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(ROOT / "gui"))
 from shared import Paths
+from platform_utils import acquire_lock
 
 
 def initialize(paths):
     paths.config.mkdir(parents=True, exist_ok=True)
     with (paths.config / ".initialize.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        acquire_lock(lock)
         (paths.config / "h265").mkdir(exist_ok=True)
         paths.state.mkdir(parents=True, exist_ok=True)
         paths.state.chmod(0o700)
@@ -80,7 +80,7 @@ def main():
     initialize(paths)
     if args.action == "certificate":
         with (paths.config / ".initialize.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            acquire_lock(lock)
             certificate(paths.state, args.host)
 
 

@@ -6,7 +6,7 @@ FROM ${PYTHON_IMAGE}
 LABEL org.opencontainers.image.title="DouyinLiveRecorder-Web" \
       org.opencontainers.image.source="https://github.com/MalcolmLu/DouyinLiveRecorder-Web" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.0.0"
+      org.opencontainers.image.version="1.1.2"
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai
 WORKDIR /app

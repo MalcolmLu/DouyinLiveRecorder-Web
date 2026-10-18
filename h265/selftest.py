@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+selected_encoder = (sys.argv[sys.argv.index('--encoder')+1] if '--encoder' in sys.argv else
+                    'hevc_qsv' if '--hardware' in sys.argv else 'libx265')
 script = Path(__file__).with_name('postprocess.py')
 spec = importlib.util.spec_from_file_location('h265_test_module', script)
 module = importlib.util.module_from_spec(spec)
@@ -22,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
     (module.HOME / 'settings.json').write_text(json.dumps({
         'enabled': True, 'crf': 24, 'preset': 'veryfast', 'cpu_threads': 2,
         'copy_already_hevc': True,
-        'encoder': 'hevc_qsv' if '--hardware' in sys.argv else 'libx265'}))
+        'encoder': selected_encoder}))
     source = module.ROOT / 'success.ts'
     subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
                     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15',
@@ -95,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
     assert module.probe(kept_mp4.with_name('kept-original.H265.mp4'))[1]['codec_name'] == 'hevc'
     progress = json.loads((module.HOME / 'current-job.json').read_text())
     assert progress['job_id'] == identifier and progress['duration'] > 0
-    assert progress['encoder'] == ('hevc_qsv' if '--hardware' in sys.argv else 'libx265')
+    assert progress['encoder'] == (selected_encoder)
     assert 'progress=end' in (module.HOME / 'progress.txt').read_text()
     print('PASS MP4 original preserved with separate H265 output; real progress emitted')
 
@@ -113,7 +115,93 @@ with tempfile.TemporaryDirectory(prefix='h265-selftest-') as directory:
         assert changed.exists() and not changed.with_suffix('.mp4').exists()
     print('PASS changed source is retained')
 
+    # Two TS runs restart their timestamps. The quick duration probe sees only
+    # one run; a complete remux and transcode both recover the full timeline.
+    part = root / 'timestamp-part.ts'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                    '-i', 'testsrc2=size=320x180:rate=15', '-f', 'lavfi',
+                    '-i', 'sine=frequency=440:sample_rate=48000', '-t', '12',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                    '-c:a', 'aac', '-f', 'mpegts', str(part)], check=True)
+    discontinuous = module.ROOT / 'discontinuous.ts'
+    discontinuous.write_bytes(part.read_bytes() * 2)
+    estimated = module.probe(discontinuous)[0]
+    identifier = module.enqueue(discontinuous, False)
+    with module.connect() as db:
+        job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+    module.encode(job)
+    corrected = discontinuous.with_suffix('.mp4')
+    actual = module.probe(corrected)[0]
+    assert abs(actual - estimated) > max(1.0, estimated * .001)
+    assert discontinuous.exists() and actual >= 23.9
+    assert module.mapped_packet_counts(discontinuous) == module.mapped_packet_counts(corrected)
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(corrected),
+                    '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+    print('PASS timestamp-discontinuous TS: estimated %.3fs, verified %.3fs, all video/audio packets preserved' % (estimated, actual))
+
+    truncated = root / 'truncated.mp4'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', str(corrected),
+                    '-t', '8', '-map', '0:v:0', '-map', '0:a?', '-c', 'copy', str(truncated)], check=True)
+    try:
+        module.verify_duration(discontinuous, truncated, estimated, module.probe(truncated)[0])
+        raise AssertionError('Truncated output was accepted')
+    except ValueError as error:
+        assert 'Output duration verification failed' in str(error) and discontinuous.exists()
+    print('PASS full-file verification rejects genuinely truncated output')
+
+    # A longer audio track must be compared independently of the video track.
+    audio_tail = module.ROOT / 'audio-tail.ts'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                    '-i', 'testsrc2=size=320x180:rate=15:duration=12', '-f', 'lavfi',
+                    '-i', 'sine=frequency=660:sample_rate=44100:duration=15',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                    '-c:a', 'aac', '-f', 'mpegts', str(audio_tail)], check=True)
+    identifier = module.enqueue(audio_tail, False)
+    with module.connect() as db:
+        job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+    module.encode(job)
+    tail_output = audio_tail.with_suffix('.mp4')
+    tail_duration, tail_tracks = module.mapped_stream_timings(tail_output)
+    assert tail_tracks[1][2] > tail_tracks[0][2] + 1
+    assert module.mapped_packet_counts(audio_tail) == module.mapped_packet_counts(tail_output)
+    module.verify_mp4_timeline(audio_tail, tail_output, module.mapped_packet_counts(audio_tail), tail_duration)
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(tail_output),
+                    '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+    print('PASS AAC tail preserved: video %.3fs, audio %.3fs; per-track MP4 reference validated' %
+          (tail_tracks[0][2], tail_tracks[1][2]))
+
     if '--hardware' in sys.argv:
+        for initial_format in ('yuv420p', 'yuv420p10le'):
+            parts = []
+            for index, (size, pixel_format) in enumerate([
+                    ('320x180', initial_format), ('640x360', 'yuv420p'),
+                    ('320x180', 'yuv420p10le'), ('320x180', 'yuvj420p')]):
+                part = root / ('changing-%s-%d.ts' % (initial_format, index))
+                subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                                '-i', 'testsrc2=size=%s:rate=15' % size, '-f', 'lavfi',
+                                '-i', 'sine=frequency=440:sample_rate=48000', '-t', '12',
+                                '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15',
+                                '-pix_fmt', pixel_format, '-c:a', 'aac',
+                                '-f', 'mpegts', str(part)], check=True)
+                parts.append(part)
+            changing = module.ROOT / ('changing-%s.ts' % initial_format)
+            changing.write_bytes(b''.join(p.read_bytes() for p in parts))
+            identifier = module.enqueue(changing, False)
+            with module.connect() as db:
+                job = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+            module.encode(job)
+            converted = changing.with_suffix('.mp4')
+            length, video, audio = module.probe(converted)
+            assert (video['width'], video['height'], video['codec_name']) == (320, 180, 'hevc')
+            assert length >= 47.9 and audio == 1 and changing.exists()
+            assert module.mapped_packet_counts(changing) == module.mapped_packet_counts(converted)
+            expected_depth = 'yuv420p10le' if initial_format == 'yuv420p10le' else 'yuv420p'
+            assert video['pix_fmt'] == expected_depth
+            assert video['color_range'] == 'tv'
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-i', str(converted),
+                            '-f', 'null', '-'], check=True, stdout=subprocess.DEVNULL)
+            print('PASS QSV mid-stream resolution/pixel-format changes, %s: all frames/audio packets preserved' % initial_format)
+
         cfg_path = module.HOME / 'settings.json'
         cfg = json.loads(cfg_path.read_text())
         cfg['qsv_device'] = '/dev/dri/renderD999999'

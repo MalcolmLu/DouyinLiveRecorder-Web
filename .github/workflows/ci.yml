@@ -37,10 +37,25 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      # Docker's official ECR mirror avoids anonymous Docker Hub runner limits.
-      - run: >-
-          docker build -t dlr-web:test
-          --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
-          --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-trixie .
+      # Prefer the official ECR mirror; use Docker Hub if that mirror is limited.
+      - name: Build container with official-registry rate-limit fallback
+        shell: bash
+        run: |
+          build_log=$(mktemp)
+          trap 'rm -f "$build_log"' EXIT
+          if docker build -t dlr-web:test \
+            --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim \
+            --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-trixie . \
+            2>&1 | tee "$build_log"; then
+            exit 0
+          fi
+          if grep -Eqi '429|toomanyrequests|Too Many Requests' "$build_log"; then
+            docker build -t dlr-web:test .
+          else
+            exit 1
+          fi
       - run: docker run --rm dlr-web:test python h265/selftest.py
+      - run: docker run --rm dlr-web:test python h265/queue_selftest.py
+      - run: docker run --rm dlr-web:test python h265/merge_selftest.py
+      - run: docker run --rm dlr-web:test python h265/library_selftest.py
       - run: python scripts/container_smoke.py dlr-web:test

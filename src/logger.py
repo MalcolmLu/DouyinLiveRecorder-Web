@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 from loguru import logger
 
 logger.remove()
@@ -16,10 +17,11 @@ logger.add(
     enqueue=True
 )
 
-script_path = os.path.split(os.path.realpath(sys.argv[0]))[0]
+script_path = str(Path(__file__).resolve().parent.parent)
+log_path = os.environ.get("RECORDER_LOG_DIR",f"{script_path}/logs")
 
 logger.add(
-    f"{script_path}/logs/streamget.log",
+    f"{log_path}/streamget.log",
     level="DEBUG",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     filter=lambda i: i["level"].name != "INFO",
@@ -31,7 +33,7 @@ logger.add(
 )
 
 logger.add(
-    f"{script_path}/logs/PlayURL.log",
+    f"{log_path}/PlayURL.log",
     level="INFO",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {message}",
     filter=lambda i: i["level"].name == "INFO",

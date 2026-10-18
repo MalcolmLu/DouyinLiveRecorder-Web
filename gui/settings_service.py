@@ -55,6 +55,7 @@ class ConfigService:
             result.append({
                 "id": room_id(url), "url": url, "name": meta.get("name") or name or urlsplit(url).path.strip("/"),
                 "quality": quality, "enabled": enabled, "proxy": meta.get("proxy", "inherit"),
+                "auto_merge": meta.get("auto_merge", True),
                 "platform": platform(url), "_line": index, "_name_value": meta.get("name") or name,
             })
         return result
@@ -101,6 +102,7 @@ class ConfigService:
             "post_format": "mp4" if s.get(RECORD_KEYS["post_format"], "是") == "是" else "keep",
             "delete_original": s.get(RECORD_KEYS["delete_original"], "是") == "是",
             "h265": h.get("enabled", True), "qsv_quality": int(h.get("qsv_quality", 24)),
+            "merge_parts": h.get("merge_parts", True), "delete_merged_parts": h.get("delete_merged_parts", True),
         }
         pending = self.store.json_read(self.pending, {})
         desired = dict(actual, **pending.get("values", {}))
@@ -135,6 +137,9 @@ class ConfigService:
             name = clean_label(body.get("name", ""))
             quality = body.get("quality", "原画")
             mode = body.get("proxy", "direct")
+            auto_merge = body.get("auto_merge", True)
+            if type(auto_merge) is not bool:
+                raise AppError("自动合并开关不正确。")
             if quality not in QUALITIES or mode not in PROXY_MODES:
                 raise AppError("请选择有效的画质和代理方式。")
             if any(r["url"] == url for r in self.rooms()):
@@ -146,7 +151,7 @@ class ConfigService:
                 text += "\n"
             text += quality + "," + url + (",主播: " + name if name else "") + "\n"
             meta = self.store.json_read(self.metadata, {})
-            meta[url] = {"proxy": mode, "name": name}
+            meta[url] = {"proxy": mode, "name": name, "auto_merge": auto_merge}
             self.store.json_write(self.metadata, meta)
             self.store.write(self.urls, text)
             return room_id(url)
@@ -166,6 +171,9 @@ class ConfigService:
             quality = body.get("quality", row["quality"])
             mode = body.get("proxy", row["proxy"])
             enabled = body.get("enabled", row["enabled"])
+            auto_merge = body.get("auto_merge", row["auto_merge"])
+            if type(auto_merge) is not bool:
+                raise AppError("自动合并开关不正确。")
             if quality not in QUALITIES or mode not in PROXY_MODES or type(enabled) is not bool:
                 raise AppError("直播间设置不正确。")
             if mode == "shared" and not self.proxy_public()["configured"]:
@@ -175,7 +183,7 @@ class ConfigService:
             meta = self.store.json_read(self.metadata, {})
             if url != row["url"]:
                 meta.pop(row["url"], None)
-            meta[url] = {"proxy": mode, "name": name}
+            meta[url] = {"proxy": mode, "name": name, "auto_merge": auto_merge}
             self.store.json_write(self.metadata, meta)
             self.store.write(self.urls, "\n".join(lines) + "\n")
             return room_id(url)
@@ -232,7 +240,7 @@ class ConfigService:
                 text += "\n"
             text += "# " + row["quality"] + "," + url + (",主播: " + name if name else "") + "\n"
             meta = self.store.json_read(self.metadata, {})
-            meta[url] = {"name":name, "proxy":row["proxy"]}
+            meta[url] = {"name":name, "proxy":row["proxy"], "auto_merge":row.get("auto_merge", True)}
             self.store.json_write(self.metadata, meta)
             self.store.write(self.urls, text)
             archive.pop(identifier)
@@ -245,7 +253,7 @@ class ConfigService:
             values = body.get("values")
             if not isinstance(values, dict) or set(values) != set(self.settings()["values"]):
                 raise AppError("录制设置字段不完整，请刷新页面。")
-            for key in ("segment_enabled", "delete_original", "h265"):
+            for key in ("segment_enabled", "delete_original", "h265", "merge_parts", "delete_merged_parts"):
                 if type(values[key]) is not bool:
                     raise AppError("开关设置不正确。")
             for key, low, high in (("segment_seconds", 60, 86400), ("poll_seconds", 30, 3600), ("qsv_quality", 1, 51)):
@@ -255,13 +263,16 @@ class ConfigService:
                                     "qsv_quality": "H.265 质量参数应为 1–51。"}[key])
             if values["record_format"] not in ("TS", "MKV", "MP4") or values["quality"] not in QUALITIES or values["post_format"] not in ("mp4", "keep"):
                 raise AppError("请选择支持的录制格式、保存格式和画质。")
-            record = {k: v for k, v in values.items() if k not in ("h265", "qsv_quality")}
+            record = {k: v for k, v in values.items() if k not in ("h265", "qsv_quality", "merge_parts", "delete_merged_parts")}
             self.store.json_write(self.pending, {"values": record, "requested_at": time.time()})
             h = self.store.json_read(self.h265, {})
             if values["post_format"] == "mp4":
                 h["enabled"] = values["h265"]
             h["qsv_quality"] = values["qsv_quality"]
-            h["encoder"] = "hevc_qsv"
+            h["crf"] = values["qsv_quality"]
+            h["merge_parts"] = values["merge_parts"]
+            h["delete_merged_parts"] = values["delete_merged_parts"]
+            h.setdefault("encoder", "hevc_qsv")
             self.store.json_write(self.h265, h)
 
     def apply_pending(self):

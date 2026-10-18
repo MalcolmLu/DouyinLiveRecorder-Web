@@ -65,13 +65,14 @@ not_record_list = []
 start_display_time = datetime.datetime.now()
 global_proxy = False
 recording_time_list = {}
-script_path = os.path.split(os.path.realpath(sys.argv[0]))[0]
-config_file = f'{script_path}/config/config.ini'
-url_config_file = f'{script_path}/config/URL_config.ini'
-backup_dir = f'{script_path}/backup_config'
+script_path = str(Path(__file__).resolve().parent)
+_data_config = os.environ.get('RECORDER_CONFIG_DIR', f'{script_path}/config')
+config_file = str(Path(_data_config)/'config.ini')
+url_config_file = str(Path(_data_config)/'URL_config.ini')
+backup_dir = os.environ.get('RECORDER_BACKUP_DIR', f'{script_path}/backup_config')
 text_encoding = 'utf-8-sig'
 rstr = r"[\/\\\:\*\？?\"\<\>\|&#.。,， ~！· ]"
-default_path = f'{script_path}/downloads'
+default_path = os.environ.get('RECORDER_DOWNLOADS_DIR', f'{script_path}/downloads')
 os.makedirs(default_path, exist_ok=True)
 file_update_lock = threading.Lock()
 os_type = os.name
@@ -1801,6 +1802,9 @@ while True:
             with open(url_config_file, 'r', encoding=text_encoding) as file:
                 ini_URL_content = file.read().strip()
 
+        if not ini_URL_content.strip() and os.environ.get('DLR_DESKTOP') == '1':
+            time.sleep(1)
+            continue
         if not ini_URL_content.strip():
             input_url = input('请输入要录制的主播直播间网址（尽量使用PC网页端的直播间地址）:\n')
             with open(url_config_file, 'w', encoding=text_encoding) as file:
