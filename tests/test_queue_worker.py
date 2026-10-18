@@ -126,14 +126,22 @@ class ProcessControlTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX suspension integration runs on macOS/Linux")
     def test_paused_time_is_not_counted_towards_verification_timeout(self):
-        # A paused child retains elapsed monotonic time, so use work iterations.
-        script = "import time\nfor _ in range(8): time.sleep(.04)\nprint('finished')"
+        # Wait for child readiness so interpreter startup / runner scheduling
+        # cannot consume the narrow window before this test requests a pause.
+        ready, release = self.root / "ready", self.root / "release"
+        script = ("from pathlib import Path; import time\n"
+                  f"Path({str(ready)!r}).touch()\n"
+                  f"while not Path({str(release)!r}).exists(): time.sleep(.02)\n"
+                  "for _ in range(8): time.sleep(.04)\nprint('finished')")
+        active_timeout = 3
         future = self.pool.submit(self.control.run, [sys.executable, "-c", script], check=True,
-                                  timeout=.7, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.wait(lambda: bool(self.processes))
+                                  timeout=active_timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.wait(ready.exists)
         self.command("pause")
         self.wait(lambda: self.phase() == "paused")
-        time.sleep(.8)
+        time.sleep(active_timeout + .2)
+        self.assertFalse(future.done())
+        release.touch()
         self.command("resume")
         self.assertEqual(future.result(timeout=5).stdout.strip(), b"finished")
 
