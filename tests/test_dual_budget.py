@@ -40,10 +40,15 @@ class SharedBudgetTests(unittest.TestCase):
         self.admission = queue_control.HistoryYieldGate(self.hist)
 
     @staticmethod
+    @contextmanager
     def connect(file):
         db = sqlite3.connect(file, timeout=2)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def tearDown(self):
         self.gate.close(); self.admission.close(); self.tmp.cleanup()
@@ -290,12 +295,12 @@ class SharedBudgetTests(unittest.TestCase):
         self.assertIsNone(control.wait_reason('running',False))
 
     def test_live_admission_respects_historical_claim_lock(self):
-        hist = self.connect(self.hist)
-        try:
-            hist.execute('BEGIN IMMEDIATE')
-            with self.admission.admission(2) as reason: self.assertEqual(reason,'waiting_history')
-        finally:
-            hist.rollback();hist.close()
+        with self.connect(self.hist) as hist:
+            try:
+                hist.execute('BEGIN IMMEDIATE')
+                with self.admission.admission(2) as reason: self.assertEqual(reason,'waiting_history')
+            finally:
+                hist.rollback()
         with self.admission.admission(2) as reason: self.assertIsNone(reason)
 
 

@@ -107,6 +107,43 @@ class LibraryTests(unittest.TestCase):
         with self.primary_p.connect() as db:queue_control.runtime(db,'test-primary','idle')
         return library.PriorityGate(self.primary_p.DB)
 
+    def test_queue_maintenance_returns_with_its_database_handles_closed(self):
+        from unittest.mock import patch
+        from library_reconcile import reconcile
+        from library_prune_hevc import prune
+        (self.videos/'present.flv').write_bytes(b'keep')
+        library.seed(self.p)
+        real_connect = sqlite3.connect
+        for operation in (reconcile, prune):
+            with self.subTest(operation=operation.__name__):
+                connections = []
+
+                def tracked_connect(*args, **kwargs):
+                    connection = real_connect(*args, **kwargs)
+                    connections.append(connection)
+                    return connection
+
+                def h264_source(root, row):
+                    return dict(row, codec='h264')
+
+                try:
+                    with patch('sqlite3.connect', side_effect=tracked_connect), \
+                         patch('library_prune_hevc.inspect', side_effect=h264_source):
+                        result = operation(self.p.DB, self.videos, True)
+                    self.assertTrue(connections)
+                    for connection in connections:
+                        with self.assertRaises(sqlite3.ProgrammingError):
+                            connection.execute('SELECT 1')
+                    backup = Path(result['backup'])
+                    with closing(real_connect(backup)) as db:
+                        self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0], 1)
+                    backup.unlink()
+                    self.assertFalse(backup.exists())
+                    self.assertEqual((self.videos/'present.flv').read_bytes(), b'keep')
+                finally:
+                    for connection in connections:
+                        connection.close()
+
     def test_priority_blocks_every_pending_primary_operation_and_stale_or_paused_workers(self):
         gate=self.primary()
         self.assertIsNone(gate.reason())

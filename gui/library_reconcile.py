@@ -1,5 +1,6 @@
 """Reconcile an existing one-shot batch without importing or touching media."""
 import argparse
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +27,7 @@ def reconcile(database, root, apply=False):
         backup = None
         if apply:
             backup = str(Path(database).with_name('queue.before-reconcile-' + str(time.time_ns()) + '.sqlite3'))
-            with sqlite3.connect(backup) as target:
+            with closing(sqlite3.connect(backup)) as target:
                 db.backup(target)
         db.execute('BEGIN IMMEDIATE' if apply else 'BEGIN')
         batch = db.execute('SELECT root FROM library_batch WHERE id=1').fetchone()

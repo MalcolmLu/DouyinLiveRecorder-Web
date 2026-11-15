@@ -1,5 +1,6 @@
 """Exercise concurrent child processes and the real persisted queue controls."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import signal
@@ -39,15 +40,40 @@ class ParallelQueueTests(unittest.TestCase):
         self.second_count = self.root / 'second-count'
         self.second_pid = self.root / 'second-pid'
         self.priority_started = self.root / 'priority-started'
+        # Readers must observe completed snapshots, including while a child is
+        # being paused; write_text alone briefly exposes an empty file.
         self.counter = ('import pathlib,sys,time\np=pathlib.Path(sys.argv[1]);n=0\n'
-                        'while True:\n n+=1;p.write_text(str(n));time.sleep(.03)\n')
+                        'while True:\n n+=1;t=p.with_suffix(".next");t.write_text(str(n));'
+                        't.replace(p);time.sleep(.03)\n')
         self.child = self.root / 'parallel_child.py'
-        self.child.write_text('''import os,sqlite3,subprocess,sys,time\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport queue_control\ndatabase,counter,pidfile,identifier=sys.argv[2:]\ntoken=os.environ['DLR_PARALLEL_TOKEN']\nwith sqlite3.connect(database) as db:\n db.row_factory=sqlite3.Row\n assert queue_control.claim_reserved_parallel(db,identifier,token)\nwith queue_control.priority_lifetime('DLR_PARALLEL_PARENT_PID') as shutdown:\n c=queue_control.JobControl(database,token,identifier,shutdown,parallel_worker=True)\n c.report('encoding',force=True)\n Path(pidfile).write_text(str(os.getpid()))\n script="import pathlib,sys,time\\np=pathlib.Path(sys.argv[1]);n=0\\nwhile True:\\n n+=1;p.write_text(str(n));time.sleep(.03)\\n"\n try:\n  c.run([sys.executable,'-c',script,counter],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n except queue_control.JobStopped:\n  with sqlite3.connect(database) as db: db.execute("UPDATE jobs SET status='stopped' WHERE id=?",(identifier,))\n except queue_control.WorkerShutdown:\n  with sqlite3.connect(database) as db: db.execute("UPDATE jobs SET status='queued' WHERE id=?",(identifier,))\n finally:\n  c.close()\n  with sqlite3.connect(database) as db: queue_control.runtime(db,token,'offline',parallel=True)\n''')
+        self.child.write_text('''import os,sqlite3,subprocess,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import queue_control
+database,counter,pidfile,script,identifier=sys.argv[2:]
+token=os.environ['DLR_PARALLEL_TOKEN']
+with sqlite3.connect(database) as db:
+ db.row_factory=sqlite3.Row
+ assert queue_control.claim_reserved_parallel(db,identifier,token)
+with queue_control.priority_lifetime('DLR_PARALLEL_PARENT_PID') as shutdown:
+ c=queue_control.JobControl(database,token,identifier,shutdown,parallel_worker=True)
+ c.report('encoding',force=True)
+ Path(pidfile).write_text(str(os.getpid()))
+ try:
+  c.run([sys.executable,'-c',script,counter],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ except queue_control.JobStopped:
+  with sqlite3.connect(database) as db: db.execute("UPDATE jobs SET status='stopped' WHERE id=?",(identifier,))
+ except queue_control.WorkerShutdown:
+  with sqlite3.connect(database) as db: db.execute("UPDATE jobs SET status='queued' WHERE id=?",(identifier,))
+ finally:
+  c.close()
+  with sqlite3.connect(database) as db: queue_control.runtime(db,token,'offline',parallel=True)
+''')
         self.priority = self.root / 'priority_child.py'
         self.priority.write_text('''import sqlite3,sys,time\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport queue_control\ndatabase,marker,identifier=sys.argv[2:]\nwith sqlite3.connect(database) as db:\n db.row_factory=sqlite3.Row\n assert queue_control.claim_priority(db,identifier)\n queue_control.runtime(db,'priority-child','encoding',identifier,priority=True)\nPath(marker).write_text('running')\ntime.sleep(.9)\nwith sqlite3.connect(database) as db:\n db.execute("UPDATE jobs SET status='done' WHERE id=?",(identifier,))\n queue_control.runtime(db,'priority-child','offline',priority=True)\n queue_control.clear_priority(db,identifier)\n''')
         self.manager = queue_control.ParallelManager(
             self.dbpath, [sys.executable, str(self.child), str(ROOT / 'gui'), str(self.dbpath),
-                          str(self.second_count), str(self.second_pid)], self.root / 'parallel.log')
+                          str(self.second_count), str(self.second_pid), self.counter], self.root / 'parallel.log')
         self.control = queue_control.JobControl(
             self.dbpath, 'primary', self.ids[0], self.stop.is_set, parallel_manager=self.manager,
             priority_command=[sys.executable, str(self.priority), str(ROOT / 'gui'), str(self.dbpath),
@@ -56,10 +82,15 @@ class ParallelQueueTests(unittest.TestCase):
         # task may start its encoder without running two encoders together.
         self.control.phase = 'verifying'
 
+    @contextmanager
     def db(self):
         db = sqlite3.connect(self.dbpath, timeout=10)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def wait(self, predicate, label, timeout=10):
         until = time.monotonic() + timeout
@@ -121,14 +152,17 @@ class ParallelQueueTests(unittest.TestCase):
     def test_stop_ends_both_active_tasks_and_keeps_queued_work(self):
         self.start()
         self.wait(lambda:len(self.state()['workers']) == 2, 'two visible workers')
+        child = self.manager.process
+        self.assertIsNotNone(child)
         with self.db() as db:
             state = queue_control.snapshot(db)
             queue_control.request_control(db, 'stop', state['control_revision'], state['current_job_id'])
         with self.assertRaises(queue_control.JobStopped): self.future.result(timeout=15)
         with self.db() as db:
             db.execute("UPDATE jobs SET status='stopped' WHERE id=?", (self.ids[0],))
-        self.wait(lambda:self.manager.process.poll() is not None, 'parallel stopped')
+        self.wait(lambda:child.poll() is not None, 'parallel stopped')
         self.manager.reap()
+        self.assertIsNone(self.manager.process)
         with self.db() as db:
             statuses = [db.execute('SELECT status FROM jobs WHERE id=?',(i,)).fetchone()[0] for i in self.ids]
         self.assertEqual(statuses, ['stopped','stopped','queued'])

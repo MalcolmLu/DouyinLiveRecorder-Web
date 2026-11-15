@@ -1,5 +1,6 @@
 """Exclude already-HEVC sources from an existing batch; never modify media."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import argparse
 import json
 import math
@@ -66,7 +67,7 @@ def prune(database, root, apply=False, progress=None):
         excluded, changed, backup = [], [], None
         if apply:
             backup = str(Path(database).with_name('queue.before-hevc-prune-' + str(time.time_ns()) + '.sqlite3'))
-            with sqlite3.connect(backup) as target:
+            with closing(sqlite3.connect(backup)) as target:
                 db.backup(target)
             db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS deleted_jobs(id TEXT PRIMARY KEY,deleted_at REAL NOT NULL)')

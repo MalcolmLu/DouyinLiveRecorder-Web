@@ -1,5 +1,6 @@
 """Exercise the shared encoder with real processes and independent queues."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import signal
@@ -48,10 +49,15 @@ class EncodeVerifyOverlapTests(unittest.TestCase):
                        'i=0\nwhile not stop.exists():\n i+=1;counter.write_text(str(i));time.sleep(.03)\n')
 
     @staticmethod
+    @contextmanager
     def connect(path):
         db = sqlite3.connect(path, timeout=5)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def wait(self, predicate, label, timeout=8):
         deadline = time.monotonic() + timeout

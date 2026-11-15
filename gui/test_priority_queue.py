@@ -1,4 +1,5 @@
 """Priority jobs suspend only their sibling encoder and preserve its progress."""
+from contextlib import closing
 import sqlite3
 import subprocess
 import sys
@@ -20,7 +21,7 @@ class PriorityQueueTests(unittest.TestCase):
         self.db = self.root / "queue.sqlite3"
         self.downloads = self.root / "downloads"
         self.downloads.mkdir()
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection, connection:
             connection.execute(
                 "CREATE TABLE jobs(id TEXT PRIMARY KEY, source TEXT, size INTEGER, mtime INTEGER, "
                 "delete_source INTEGER, h264 INTEGER, status TEXT, error TEXT, output TEXT, "
@@ -45,7 +46,7 @@ class PriorityQueueTests(unittest.TestCase):
                                            priority_command=command)
         old_process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(5)"])
         try:
-            with sqlite3.connect(self.db) as connection:
+            with closing(sqlite3.connect(self.db)) as connection, connection:
                 connection.execute("UPDATE queue_control SET priority_job_id=?", ("b" * 64,))
             started = time.monotonic()
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -58,7 +59,7 @@ class PriorityQueueTests(unittest.TestCase):
                 self.assertEqual(old_process.poll(), None)
                 elapsed = future.result(timeout=5)
             self.assertGreaterEqual(elapsed, .15)
-            with sqlite3.connect(self.db) as connection:
+            with closing(sqlite3.connect(self.db)) as connection, connection:
                 connection.execute("UPDATE jobs SET status='done' WHERE id=?", ("b" * 64,))
                 connection.execute("UPDATE queue_control SET priority_job_id=NULL")
             control.checkpoint(old_process)
@@ -75,19 +76,19 @@ class PriorityQueueTests(unittest.TestCase):
                                            priority_command=command)
         old_process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(5)"])
         try:
-            with sqlite3.connect(self.db) as connection:
+            with closing(sqlite3.connect(self.db)) as connection, connection:
                 connection.execute("UPDATE queue_control SET priority_job_id=?", ("b" * 64,))
             control.checkpoint(old_process)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
-                with sqlite3.connect(self.db) as connection:
+                with closing(sqlite3.connect(self.db)) as connection, connection:
                     value = connection.execute(
                         "SELECT priority_job_id FROM queue_control WHERE id=1").fetchone()[0]
                 if value is None:
                     break
                 time.sleep(.05)
             self.assertIsNone(value)
-            with sqlite3.connect(self.db) as connection:
+            with closing(sqlite3.connect(self.db)) as connection, connection:
                 status = connection.execute("SELECT status FROM jobs WHERE id=?", ("b" * 64,)).fetchone()[0]
             self.assertNotEqual(status, "running")
         finally:
@@ -105,7 +106,7 @@ class PriorityQueueTests(unittest.TestCase):
                                                  priority_command=command)
         old = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(15)'])
         try:
-            with sqlite3.connect(self.db) as db:
+            with closing(sqlite3.connect(self.db)) as db, db:
                 db.execute('UPDATE queue_control SET priority_job_id=?', ('b' * 64,))
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(control.checkpoint, old)
@@ -142,7 +143,7 @@ class PriorityQueueTests(unittest.TestCase):
             control.close()
 
     def test_selected_job_stays_first_when_the_waiting_queue_is_sorted(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             db.row_factory = sqlite3.Row
             db.execute("INSERT INTO jobs(id,source,size,mtime,status,created) VALUES(?, 'c.ts',0,0,'queued',0)", ('c' * 64,))
             queue_control.migrate(db)
@@ -152,7 +153,7 @@ class PriorityQueueTests(unittest.TestCase):
             self.assertEqual(queue_control.queued_ids(db), ['b' * 64, 'c' * 64])
 
     def test_child_foreground_snapshot_does_not_lose_the_suspended_parent(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             db.row_factory = sqlite3.Row
             db.execute("UPDATE jobs SET status='running' WHERE id=?", ('b' * 64,))
             db.execute('UPDATE queue_control SET priority_job_id=?', ('b' * 64,))
