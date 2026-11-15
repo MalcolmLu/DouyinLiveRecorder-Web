@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gui"))
 import queue_control
+import job_metrics
 
 
 class ProcessControlTests(unittest.TestCase):
@@ -97,11 +98,17 @@ class ProcessControlTests(unittest.TestCase):
         self.command("pause")
         self.wait(lambda: self.phase() == "paused")
         before = counter.read_bytes()
+        with self.db() as db:
+            paused_runtime = job_metrics.read(db, [self.identifier])[self.identifier]
         time.sleep(.4)
         self.assertEqual(counter.read_bytes(), before)
+        with self.db() as db:
+            self.assertEqual(job_metrics.read(db, [self.identifier])[self.identifier], paused_runtime)
         self.assertFalse(future.done())
         self.command("resume")
         self.wait(lambda: counter.read_bytes() != before)
+        with self.db() as db:
+            self.assertGreater(job_metrics.read(db, [self.identifier])[self.identifier], paused_runtime)
         self.command("stop")
         with self.assertRaises(queue_control.JobStopped):
             future.result(timeout=5)

@@ -4,6 +4,7 @@ Run in a separate container with only the requested library mounted read/write.
 No Docker socket, network access or recorder restart is required.
 """
 import argparse
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import json
@@ -23,6 +24,7 @@ import time
 import uuid
 
 import queue_control
+from library_policy import retention_details
 from platform_utils import acquire_lock
 from shared import read_json, write_json
 
@@ -31,24 +33,55 @@ LOG = logging.getLogger('library_h265')
 
 
 class PriorityGate:
-    def __init__(self, database, required_sessions=()):
+    def __init__(self, database, required_sessions=(), *, historical_database=None):
         self.database = Path(database)
+        self.historical_database = Path(historical_database) if historical_database is not None else None
         if not isinstance(required_sessions, (list, tuple)) or len(required_sessions)>10000 or any(
                 not isinstance(value,str) or not re.fullmatch(r'[0-9a-f]{64}',value) for value in required_sessions):
             raise ValueError('Invalid prerequisite merge sessions')
         self.required_sessions = list(dict.fromkeys(required_sessions))
         self.connection = None
+        self.history_connection = None
         self.lock = threading.Lock()
         self.last_warning = 0
 
     def reason(self):
+        return self.reason_for(None, 'primary')
+
+    def reason_for(self, job_id, role, history_db=None):
         with self.lock:
-            return self._reason()
+            return self._reason(job_id, role, history_db)
+
+    def encoder_demand(self):
+        """Let runnable live work take the encoder while history keeps its progress."""
+        with self.lock:
+            try:
+                if self.connection is None:
+                    return 'primary_unavailable'
+                db = self.connection
+                state = queue_control.snapshot(db)
+                if not state['online'] or state['mode'] != 'running':
+                    return 'primary_unavailable'
+                if any(worker['phase'] in ('starting', 'preparing', 'encoding', 'waiting_encoder')
+                       for worker in state['workers']):
+                    return 'primary_busy'
+                active = db.execute("SELECT count(*) FROM jobs WHERE status IN ('running','published')").fetchone()[0]
+                if (active < min(queue_control.MAX_TASKS, state['max_workers']) and
+                        (not active or state['parallel_wait_reason'] not in ('memory', 'storage')) and
+                        queue_control.next_runnable(db, include_published=False) is not None):
+                    return 'primary_busy'
+                return None
+            except (OSError, sqlite3.Error, KeyError):
+                self.close()
+                return 'primary_unavailable'
 
     def close(self):
         if self.connection is not None:
             self.connection.close()
             self.connection = None
+        if self.history_connection is not None:
+            self.history_connection.close()
+            self.history_connection = None
 
     def __del__(self):
         try:
@@ -56,7 +89,45 @@ class PriorityGate:
         except Exception:
             pass
 
-    def _reason(self):
+    def _history_allowed(self, db, job_id, role, capacity):
+        marker = db.execute('SELECT priority_job_id FROM queue_control WHERE id=1').fetchone()[0]
+        owners = []
+        if marker and queue_control.priority_status(db, marker) in ('queued', 'running', 'published'):
+            owners.append(('priority', marker))
+        # A promoted worker can finish encoding after its marker is cleared and
+        # continue into verification. Keep that live worker in the shared
+        # capacity accounting, otherwise its next checkpoint mistakes the
+        # ordinary worker for an unrelated task and pauses the verifier.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='queue_priority_worker'").fetchone():
+            promoted = db.execute(
+                'SELECT job_id,phase,heartbeat,protocol FROM queue_priority_worker WHERE id=1'
+            ).fetchone()
+            now = time.time()
+            if (promoted and promoted['job_id'] and promoted['protocol'] == queue_control.PROTOCOL
+                    and promoted['phase'] != 'offline'
+                    and 0 <= now - promoted['heartbeat'] < 15
+                    and queue_control.priority_status(db, promoted['job_id']) in ('running', 'published')
+                    and ('priority', promoted['job_id']) not in owners):
+                owners.append(('priority', promoted['job_id']))
+        ordinary = []
+        for name, owner in [('queue_worker','primary'), ('queue_parallel_worker','parallel'),
+                            ('queue_parallel_worker2','parallel2')]:
+            row = db.execute('SELECT job_id,phase FROM ' + name + ' WHERE id=1').fetchone()
+            if row and row['job_id'] and row['phase'] != 'offline' and queue_control.priority_status(db, row['job_id']) in ('running','published'):
+                ordinary.append((owner, row['job_id'], row['phase']))
+        # Keep completed encodes verifying while live takes the encoder.
+        ordinary.sort(key=lambda item: item[2] not in ('verifying', 'publishing', 'finalizing'))
+        owners.extend((owner, identifier) for owner, identifier, _ in ordinary)
+        if job_id is not None and job_id == marker:
+            return capacity > 0
+        if job_id is not None:
+            return (role, job_id) in owners[:capacity]
+        if role == 'primary' and marker and queue_control.priority_status(db, marker) == 'queued':
+            return capacity > 0
+        return len(owners) < capacity and all(owner != role for owner, _ in owners)
+
+    def _reason(self, job_id=None, role='primary', history_db=None):
         try:
             if self.connection is None:
                 self.connection = sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True,
@@ -74,10 +145,6 @@ class PriorityGate:
                     return 'primary_unavailable'
                 if state['mode'] != 'running':
                     return 'primary_paused'
-                if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running','published') LIMIT 1").fetchone():
-                    return 'primary_busy'
-                if state['phase'] != 'idle':
-                    return 'primary_busy'
                 if self.required_sessions:
                     placeholders=','.join('?' for _ in self.required_sessions)
                     completed=db.execute("SELECT count(*) FROM merge_sessions JOIN jobs ON jobs.id=merge_sessions.job_id "
@@ -85,6 +152,23 @@ class PriorityGate:
                                          self.required_sessions).fetchone()[0]
                     if completed!=len(self.required_sessions):
                         return 'primary_prerequisites'
+                if self.historical_database is None:
+                    if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running','published') LIMIT 1").fetchone() or state['phase'] != 'idle':
+                        return 'primary_busy'
+                else:
+                    capacity = queue_control.MAX_TASKS - queue_control.live_demand(db)
+                    if capacity <= 0:
+                        return 'primary_busy'
+                    if capacity < queue_control.MAX_TASKS:
+                        if history_db is None:
+                            if self.history_connection is None:
+                                self.history_connection = sqlite3.connect(self.historical_database.as_uri() + '?mode=ro', uri=True,
+                                                                          timeout=.2, isolation_level=None, check_same_thread=False)
+                                self.history_connection.row_factory = sqlite3.Row
+                                self.history_connection.execute('PRAGMA query_only=ON')
+                            history_db = self.history_connection
+                        if not self._history_allowed(history_db, job_id, role, capacity):
+                            return 'primary_busy'
             return None
         except (OSError, sqlite3.Error, KeyError) as exc:
             # Missing/stale primary state never permits competing GPU work.
@@ -97,39 +181,37 @@ class PriorityGate:
 
 class PriorityControl(queue_control.JobControl):
     def __init__(self, *args, gate, **kwargs):
+        kwargs.setdefault('encoder_lock', Path(args[0]).parent / 'shared-encoder.lock')
         super().__init__(*args, **kwargs)
         self.gate = gate
         self.last_reason = None
 
-    def checkpoint(self, process=None, phase=None):
-        if phase:
-            self.phase = phase
-        paused_since = None
-        while True:
-            if self.shutdown():
-                raise queue_control.WorkerShutdown()
-            with self.connect() as db:
-                row = db.execute('SELECT mode FROM queue_control WHERE id=1').fetchone()
-            if row['mode'] == 'stopped':
-                raise queue_control.JobStopped()
-            reason = 'user_paused' if row['mode'] == 'paused' else self.gate.reason()
-            if reason != self.last_reason:
-                if reason or self.last_reason:
-                    LOG.info('Priority %s job=%s', reason or 'resumed', self.job_id)
-                self.last_reason = reason
-            if reason is None:
-                if self.suspended and process is not None:
-                    self.suspend(process, False)
-                    self.suspended = False
-                self.report(self.phase, force=paused_since is not None)
-                return time.monotonic() - paused_since if paused_since is not None else 0
-            if paused_since is None:
-                paused_since = time.monotonic()
-                if process is not None:
-                    self.suspend(process, True)
-                    self.suspended = True
-            self.report('paused' if reason == 'user_paused' else 'waiting_prerequisites' if reason == 'primary_prerequisites' else 'waiting_priority', force=False)
-            time.sleep(.2)
+    def wait_reason(self, mode, waiting_priority):
+        if mode == "paused":
+            return "paused"
+        # A completed encode can continue through publication and verification
+        # while another task uses the shared encoder. The three-task budget is
+        # enforced by admission; yielding here caused verifiers to stall behind
+        # a released priority marker.
+        if self.phase in ("verifying", "publishing", "finalizing"):
+            return None
+        role = 'priority' if self.priority_worker else 'parallel2' if self.parallel_worker == 2 else 'parallel' if self.parallel_worker else 'primary'
+        reason_for = getattr(type(self.gate), 'reason_for', None)
+        gate_reason = lambda: self.gate.reason_for(self.job_id, role) if callable(reason_for) else self.gate.reason()
+        reason = super().wait_reason(mode, waiting_priority) or gate_reason()
+        demand = getattr(type(self.gate), 'encoder_demand', None)
+        if reason is None and self.phase == 'encoding' and callable(demand):
+            reason = self.gate.encoder_demand()
+        if reason != self.last_reason:
+            if reason or self.last_reason:
+                LOG.info('Priority %s job=%s', reason or 'resumed', self.job_id)
+            self.last_reason = reason
+        return reason
+
+    def wait_phase(self, reason):
+        if reason in ('paused', 'priority_wait'):
+            return reason
+        return 'waiting_prerequisites' if reason == 'primary_prerequisites' else 'waiting_priority'
 
 
 def safe_path(root, file, strict=True):
@@ -252,18 +334,34 @@ def verify_streams(p, job, source, output):
     p.checkpoint('verifying')
     decoded = p.run_process(['ffmpeg', '-nostdin', '-hide_banner', '-v', 'error', '-xerror',
                              '-err_detect', 'explode', '-threads', '1', '-i', str(output),
-                             '-map', '0:v:0', '-map', '0:a?', '-f', 'null', '-'],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                             '-map', '0:v:0', '-map', '0:a?',
+                             # The null output's default 1/fps clock can round
+                             # distinct VFR timestamps onto the same DTS tick.
+                             # Decode every frame with the input's fine clock.
+                             '-fps_mode', 'passthrough', '-enc_time_base:v', 'demux',
+                             '-progress', 'pipe:1', '-f', 'null', '-'],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             timeout=86400)
     if decoded.returncode or decoded.stderr.strip():
         raise ValueError('Library verification: output decode failed: ' + decoded.stderr.decode(errors='replace')[-1600:])
-    proof = {'verified_at': time.time(), 'packet_counts': counts, 'full_output_decode': True, 'codec': 'hevc'}
+    progress = dict(line.split('=', 1) for line in decoded.stdout.decode(errors='replace').splitlines() if '=' in line)
+    if (progress.get('progress') != 'end' or int(progress.get('frame', '0')) <= 0 or
+            int(progress.get('dup_frames', '0')) or int(progress.get('drop_frames', '0'))):
+        raise ValueError('Library verification: full decode did not preserve every video frame; original retained')
+    proof = {'verified_at': time.time(), 'packet_counts': counts, 'full_output_decode': True,
+             'decoded_video_frames': int(progress['frame']), 'video_timebase': 'demux', 'codec': 'hevc'}
     with p.connect() as db:
         db.execute('UPDATE library_files SET verification=? WHERE id=?', (json.dumps(proof), job['id']))
 
 
 class SourceBusy(Exception):
     pass
+
+
+class NoSpaceSaved(Exception):
+    def __init__(self, candidate_size):
+        self.candidate_size = candidate_size
+        super().__init__('Verified conversion is not smaller; original retained')
 
 
 def encode(p, job):
@@ -292,26 +390,175 @@ def encode(p, job):
     destination = destination_for(source, info, job['id'])
     with p.connect() as db:
         db.execute('UPDATE library_files SET destination=? WHERE id=?', (str(destination), job['id']))
-    p.encode(job, destination_override=destination, preserve_streams=True,
-             verify_output=lambda a, b: verify_streams(p, job, a, b))
+    def verify_candidate(original, candidate):
+        verify_streams(p, job, original, candidate)
+        candidate_size = candidate.stat().st_size
+        if candidate_size >= job['size']:
+            # Raising inside the processor's verification callback makes its
+            # normal cleanup discard only the unpublished candidate.
+            raise NoSpaceSaved(candidate_size)
+
+    try:
+        p.encode(job, destination_override=destination, preserve_streams=True,
+                 verify_output=verify_candidate)
+    except NoSpaceSaved as decision:
+        with p.publication() as db:
+            if safe_path(p.ROOT, source) != source or not p.unchanged(source, job):
+                raise ValueError('Source changed before retaining original; original retained')
+            if p.opened_by_ffmpeg(source):
+                raise SourceBusy()
+            row = db.execute('SELECT verification FROM library_files WHERE id=?', (job['id'],)).fetchone()
+            verified = json.loads(row['verification']) if row and row['verification'] else None
+            if not isinstance(verified, dict) or not verified.get('full_output_decode'):
+                raise ValueError('Candidate verification proof missing; original retained')
+            proof = {'decision': 'retained_original', 'reason': 'not_smaller',
+                     'source_size': job['size'], 'candidate_size': decision.candidate_size,
+                     'candidate_verification': verified, 'decided_at': time.time()}
+            db.execute("UPDATE jobs SET status='done',output=source,output_size=size,output_mtime=mtime,"
+                       "error=NULL,updated=? WHERE id=?", (time.time(), job['id']))
+            db.execute('UPDATE library_files SET destination=?,verification=? WHERE id=?',
+                       (str(source), json.dumps(proof), job['id']))
+        LOG.info('No space saved; retained original %s source_bytes=%s candidate_bytes=%s',
+                 source.relative_to(p.ROOT), job['size'], decision.candidate_size)
 
 
 def retry_requested(p):
     with p.connect() as db:
-        rows = db.execute("SELECT jobs.* FROM jobs JOIN library_files USING(id) WHERE retry_requested=1 AND status IN ('failed','stopped')").fetchall()
+        rows = db.execute("SELECT jobs.*,library_files.verification FROM jobs JOIN library_files USING(id) "
+                          "WHERE retry_requested=1 AND status IN ('failed','stopped','done')").fetchall()
         for job in rows:
+            if job['status'] == 'done' and not retention_details(job['verification'])['retained_original']:
+                db.execute('UPDATE library_files SET retry_requested=0 WHERE id=?', (job['id'],))
+                continue
             try:
                 source = safe_path(p.ROOT, job['source'])
                 stat = source.stat()
                 db.execute("UPDATE jobs SET size=?,mtime=?,status='queued',error=NULL,updated=? WHERE id=?",
                            (stat.st_size, stat.st_mtime_ns, time.time(), job['id']))
                 queue_control.append_job(db, job['id'])
+                db.execute('UPDATE library_files SET verification=NULL WHERE id=?', (job['id'],))
                 db.execute('DELETE FROM deleted_jobs WHERE id=?', (job['id'],)) if db.execute("SELECT 1 FROM sqlite_master WHERE name='deleted_jobs'").fetchone() else None
                 LOG.info('Retry requested %s', source.relative_to(p.ROOT))
             except (OSError, ValueError) as exc:
                 db.execute('UPDATE jobs SET error=?,updated=? WHERE id=?', (str(exc), time.time(), job['id']))
                 LOG.error('Retry rejected %s: %s', Path(job['source']).name, exc)
             db.execute('UPDATE library_files SET retry_requested=0 WHERE id=?', (job['id'],))
+
+
+def run_priority_job(p, identifier, primary):
+    p.HOME.mkdir(parents=True, exist_ok=True)
+    with (p.HOME / 'priority-worker.lock').open('a') as lock:
+        try:
+            acquire_lock(lock, blocking=False)
+        except BlockingIOError:
+            return
+        _run_priority_job(p, identifier, primary)
+
+
+def _run_priority_job(p, identifier, primary):
+    """Encode one promoted queued library file in an isolated worker process."""
+    migrate(p)
+    with p.connect() as db:
+        job = queue_control.claim_priority(db, identifier)
+        if job is None:
+            return
+    previous_state = p.STATE_HOME
+    p.STATE_HOME = p.HOME / 'priority-state'
+    p.STATE_HOME.mkdir(parents=True, exist_ok=True)
+    prerequisites = read_json(p.HOME / 'prerequisites.json', {}).get('sessions', [])
+    gate = PriorityGate(primary, prerequisites, historical_database=p.DB)
+    token = 'priority:' + uuid.uuid4().hex
+    with queue_control.priority_lifetime() as shutdown:
+        p.JOB_CONTROL = PriorityControl(p.DB, token, identifier, shutdown, gate=gate, priority_worker=True)
+        try:
+            p.JOB_CONTROL.report('preparing', force=True)
+            p.checkpoint('preparing')
+            encode(p, job)
+        except SourceBusy:
+            with p.connect() as db:
+                db.execute("UPDATE jobs SET status='queued',updated=? WHERE id=?", (time.time(), identifier))
+                queue_control.append_job(db, identifier)
+        except queue_control.JobStopped:
+            with p.connect() as db:
+                db.execute("UPDATE jobs SET status='stopped',error=NULL,updated=? WHERE id=? AND status='running'",
+                           (time.time(), identifier))
+        except queue_control.WorkerShutdown:
+            with p.connect() as db:
+                mode = db.execute('SELECT mode FROM queue_control WHERE id=1').fetchone()[0]
+                db.execute("UPDATE jobs SET status=?,error=NULL,updated=? WHERE id=? AND status='running'",
+                           ('stopped' if mode == 'stopped' else 'queued', time.time(), identifier))
+        except Exception as exc:
+            with p.connect() as db:
+                db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=? AND status='running'",
+                           (str(exc), time.time(), identifier))
+            LOG.error('Priority library job failed %s: %s', identifier, exc)
+        finally:
+            p.JOB_CONTROL.close()
+            p.JOB_CONTROL = None
+            gate.close()
+            with p.connect() as db:
+                queue_control.runtime(db, token, 'offline', priority=True)
+                queue_control.clear_priority(db, identifier)
+            for name in ('current-job.json', 'progress.txt'):
+                (p.STATE_HOME / name).unlink(missing_ok=True)
+            p.STATE_HOME = previous_state
+
+
+def run_parallel_job(p, identifier, primary):
+    """Process an already reserved historical job in an isolated worker."""
+    p.HOME.mkdir(parents=True, exist_ok=True)
+    token = os.environ.get('DLR_PARALLEL_TOKEN', '')
+    if not token.startswith('parallel:'):
+        return
+    slot = int(os.environ.get('DLR_PARALLEL_SLOT', '1'))
+    if slot not in (1, 2):
+        return
+    suffix = '' if slot == 1 else '2'
+    with (p.HOME / ('parallel-worker' + suffix + '.lock')).open('a') as lock:
+        try:
+            acquire_lock(lock, blocking=False)
+        except BlockingIOError:
+            return
+        with queue_control.priority_lifetime('DLR_PARALLEL_PARENT_PID') as shutdown:
+            with p.connect() as db:
+                job = queue_control.claim_reserved_parallel(db, identifier, token, slot)
+            if job is None:
+                return
+            previous_state = p.STATE_HOME
+            p.STATE_HOME = p.HOME / ('parallel' + suffix + '-state')
+            p.STATE_HOME.mkdir(parents=True, exist_ok=True)
+            prerequisites = read_json(p.HOME / 'prerequisites.json', {}).get('sessions', [])
+            gate = PriorityGate(primary, prerequisites, historical_database=p.DB)
+            p.JOB_CONTROL = PriorityControl(p.DB, token, identifier, shutdown, gate=gate, parallel_worker=slot)
+            try:
+                p.JOB_CONTROL.report('preparing', force=True)
+                p.checkpoint('preparing')
+                encode(p, job)
+            except SourceBusy:
+                with p.connect() as db:
+                    db.execute("UPDATE jobs SET status='queued',updated=? WHERE id=?", (time.time(), identifier))
+                    queue_control.append_job(db, identifier)
+            except queue_control.JobStopped:
+                with p.connect() as db:
+                    db.execute("UPDATE jobs SET status='stopped',error=NULL,updated=? WHERE id=? AND status='running'",
+                               (time.time(), identifier))
+            except queue_control.WorkerShutdown:
+                with p.connect() as db:
+                    mode = db.execute('SELECT mode FROM queue_control WHERE id=1').fetchone()[0]
+                    db.execute("UPDATE jobs SET status=?,error=NULL,updated=? WHERE id=? AND status='running'",
+                               ('stopped' if mode == 'stopped' else 'queued', time.time(), identifier))
+            except Exception as exc:
+                with p.connect() as db:
+                    db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=? AND status='running'",
+                               (str(exc), time.time(), identifier))
+                LOG.error('Parallel library job failed %s: %s', identifier, exc)
+            finally:
+                p.JOB_CONTROL.close(); p.JOB_CONTROL = None; gate.close()
+                with p.connect() as db:
+                    queue_control.runtime(db, token, 'offline', parallel=slot)
+                for name in ('current-job.json', 'progress.txt'):
+                    (p.STATE_HOME / name).unlink(missing_ok=True)
+                p.STATE_HOME = previous_state
 
 
 def worker(p, primary):
@@ -334,33 +581,50 @@ def worker(p, primary):
         token, stopped = uuid.uuid4().hex, [False]
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stopped.__setitem__(0, True))
+        queue_control.wait_for_secondary_exit(p.HOME, lambda: stopped[0])
         (p.HOME / 'worker.pid').write_text(str(os.getpid()))
         prerequisites = read_json(p.HOME / 'prerequisites.json', {}).get('sessions', [])
-        gate = PriorityGate(primary, prerequisites)
+        gate = PriorityGate(primary, prerequisites, historical_database=p.DB)
         with p.connect() as db:
             state = db.execute('SELECT mode,stop_job_id FROM queue_control WHERE id=1').fetchone()
-            if state['mode'] == 'stopped' and state['stop_job_id']:
-                db.execute("UPDATE jobs SET status='stopped' WHERE status='running' AND id=?", (state['stop_job_id'],))
+            if state['mode'] == 'stopped':
+                db.execute("UPDATE jobs SET status='stopped' WHERE status='running'")
             db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
         LOG.info('Library worker ready; recorder transcodes and merges have highest priority; scratch=%s', tempfile.gettempdir())
+        command = [sys.executable, str(Path(__file__).resolve()), '--config', str(p.HOME.parent.parent),
+                   '--root', str(p.ROOT), '--parallel-worker']
+        parallel = queue_control.ParallelManagers([
+            queue_control.ParallelManager(p.DB, command, p.HOME / ('parallel-worker' + ('' if slot == 1 else '2') + '.log'),
+                admission=lambda db, role=('parallel' if slot == 1 else 'parallel2'): nullcontext(gate.reason_for(None, role, db)),
+                slot=slot)
+            for slot in (1, 2)])
         try:
             while not stopped[0]:
+                parallel.reap()
+                safe_for_priority = parallel.safe_for_priority()
                 retry_requested(p)
                 with p.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    queue_control.release_priority(db)
                     mode = db.execute('SELECT mode FROM queue_control WHERE id=1').fetchone()[0]
                     reason = gate.reason() if mode == 'running' else None
                     job = None
                     if mode == 'running' and reason is None:
-                        ids = queue_control.queued_ids(db)
-                        job = db.execute("SELECT * FROM jobs WHERE status='published' ORDER BY created LIMIT 1").fetchone()
-                        if not job and ids:
-                            job = db.execute('SELECT * FROM jobs WHERE id=?', (ids[0],)).fetchone()
+                        marker = db.execute('SELECT priority_job_id FROM queue_control WHERE id=1').fetchone()[0]
+                        job = None if marker and not safe_for_priority else queue_control.next_primary_runnable(
+                            db, priority_ready=bool(marker and safe_for_priority))
+                        if job and job['status'] != 'published':
                             db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), job['id']))
+                            db.execute('UPDATE queue_control SET order_revision=order_revision+1 WHERE id=1')
                     phase = mode if mode != 'running' else 'waiting_prerequisites' if reason == 'primary_prerequisites' else 'waiting_priority' if reason else 'preparing' if job else 'idle'
                     queue_control.runtime(db, token, phase, job['id'] if job else None)
                 if not job:
                     time.sleep(.5); continue
-                p.JOB_CONTROL = PriorityControl(p.DB, token, job['id'], lambda: stopped[0], gate=gate)
+                p.JOB_CONTROL = PriorityControl(
+                    p.DB, token, job['id'], lambda: stopped[0], gate=gate,
+                    priority_command=[sys.executable, str(Path(__file__).resolve()),
+                                      '--config', str(p.HOME.parent.parent), '--root', str(p.ROOT), '--priority-worker'],
+                    priority_log=p.HOME / 'priority-worker.log', parallel_manager=parallel)
                 try:
                     if job['status'] == 'published':
                         with p.connect() as db:
@@ -374,6 +638,7 @@ def worker(p, primary):
                     with p.connect() as db:
                         db.execute("UPDATE jobs SET status='queued',updated=? WHERE id=?", (time.time(), job['id']))
                         queue_control.append_job(db, job['id'])
+                        queue_control.clear_priority(db, job['id'])
                     time.sleep(1)
                 except queue_control.JobStopped:
                     with p.connect() as db:
@@ -388,8 +653,13 @@ def worker(p, primary):
                         db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?", (str(exc), time.time(), job['id']))
                     LOG.error('Failed file=%s job=%s reason=%s; available originals retained', job['source'], job['id'], exc)
                 finally:
+                    if p.JOB_CONTROL is not None:
+                        p.JOB_CONTROL.close()
                     p.JOB_CONTROL = None
+                    with p.connect() as db:
+                        queue_control.release_priority(db)
         finally:
+            parallel.close()
             gate.close()
             with p.connect() as db:
                 queue_control.runtime(db, token, 'offline')
@@ -402,8 +672,16 @@ def main():
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('LIBRARY_ROOT', '/app/library')))
     parser.add_argument('--seed', action='store_true')
     parser.add_argument('--worker', action='store_true')
+    parser.add_argument('--priority-worker', metavar='JOB_ID')
+    parser.add_argument('--parallel-worker', metavar='JOB_ID')
     args = parser.parse_args()
     p = processor(args.config, args.root)
+    if args.parallel_worker:
+        run_parallel_job(p, args.parallel_worker, args.config / 'h265/queue.sqlite3')
+        return
+    if args.priority_worker:
+        run_priority_job(p, args.priority_worker, args.config / 'h265/queue.sqlite3')
+        return
     if args.seed:
         cfg = json.loads((args.config / 'h265/settings.json').read_text())
         cfg['enabled'] = True

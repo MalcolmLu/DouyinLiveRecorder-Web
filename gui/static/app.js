@@ -44,6 +44,23 @@ function bytes(n) {
   while(value>=1000 && i<units.length-1) {value/=1000;i++;}
   return (n<0 ? "−" : "") + new Intl.NumberFormat("zh-CN",{maximumFractionDigits:i>=3 ? 1 : 0}).format(value)+" "+units[i];
 }
+function gigabytes(n) {
+  return new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format((Number(n)||0)/1e9)+' GB';
+}
+function taskRuntime(job) {
+  if(job.already_hevc)return '无需转码';
+  if(job.status==='queued')return '—';
+  const seconds=job.runtime_seconds;
+  if(typeof seconds!=='number' || !Number.isFinite(seconds))return '未记录';
+  const total=Math.max(0,Math.floor(seconds)), hours=Math.floor(total/3600), minutes=Math.floor(total%3600/60);
+  return (hours ? hours+' 小时 ' : '')+(hours || minutes ? minutes+' 分 ' : '')+(total%60)+' 秒';
+}
+function renderStorageSavings() {
+  const main=ctx.snapshot?.queue?.saved_bytes || 0;
+  const historical=historicalQueue.data?.enabled ? historicalQueue.data.summary?.saved_bytes || 0 : 0;
+  setText('#queue-total-saved',gigabytes(main+historical));
+  setText('#queue-saved-detail','直播队列 '+gigabytes(main)+' · 历史队列 '+gigabytes(historical));
+}
 function elapsed(epoch) {
   if(!epoch) return "—";
   const s=Math.max(0,Math.floor(Date.now()/1000-epoch));
@@ -77,7 +94,7 @@ function renderRooms() {
   const labels={hevc_qsv:"Intel QSV",hevc_videotoolbox:"Apple VideoToolbox",hevc_nvenc:"NVIDIA NVENC",hevc_amf:"AMD AMF",libx265:"CPU"};
   const encoder=labels[data.encoding?.encoder] || "H.265";
   setText("#engine-title",data.encoding?.encoder==="libx265"?"H.265 软件转码":"H.265 硬件转码");
-  setText("#engine-description",encoder+" · 单任务队列");setText("#active-encoder-label","H.265 · "+encoder);
+  setText("#engine-description",encoder+" · 转码与核验可交叠");setText("#active-encoder-label","H.265 · "+encoder);
   renderDesktopStatus(data.desktop);
   setText("#metric-rooms",data.monitoring_count);
   setText("#metric-recording",data.recording_count);
@@ -238,18 +255,28 @@ function renderSummary() {
   for(const [key,label] of [["running","处理中"],["queued","排队中"],["stopped","已停止"],["done","已完成"],["failed","失败"]]){
     const d=node("span",label);d.append(node("strong",q[key]||0));target.append(d);
   }
+  const saved=node('span','累计节省');saved.append(node('strong',gigabytes(q.saved_bytes)));target.append(saved);
+  renderStorageSavings();
   renderQueueControl(ctx.snapshot?.queue_control);
+}
+function verificationLabel(stage){
+  return ({source_audio:'正在检查源音轨',source_video:'正在检查源视频',output_decode:'正在完整解码成品',
+    video_timestamps:'正在核对画面时间线',audio_compare:'正在核对音轨内容',complete:'核验完成，正在保存'})[stage] || '正在验证完整性';
 }
 function renderQueueControl(control) {
   if(control) queueActions.control=control;
   const state=queueActions.control, ready=state?.supported && state.online && state.phase!=="maintenance";
   const busy=queueActions.busy || jobSelection.deleting, mode=state?.mode || "running";
-  const labels={offline:"转码控制未连接",maintenance:"转码服务更新中",starting:"转码服务启动中",idle:"等待转码任务",preparing:"准备转码",encoding:"正在转码",verifying:"正在验证视频",publishing:"正在保存视频",finalizing:"正在完成收尾",pausing:"正在暂停转码",paused:"转码已暂停",stopping:"正在停止转码",stopped:"转码已停止",resuming:"正在继续转码"};
+  const labels={offline:"转码控制未连接",maintenance:"转码服务更新中",starting:"转码服务启动中",idle:"等待转码任务",waiting_history:"等待后台任务让位",waiting_encoder:"等待转码空位",preparing:"准备转码",encoding:"正在转码",verifying:"正在验证视频",publishing:"正在保存视频",finalizing:"正在完成收尾",priority_wait:"正在切换到优先任务",pausing:"正在暂停转码",paused:"转码已暂停",stopping:"正在停止转码",stopped:"转码已停止",resuming:"正在继续转码"};
   setText("#queue-control-state",labels[state?.state] || "正在连接转码服务");
   setText("#queue-control-detail",!ready ? "正在连接转码进程，请稍后刷新。" : mode==="stopped" ? "停止会保留未完成任务的原录像。继续后处理其余等待任务；已停止的任务需重新排队，从头转码。" : mode==="paused" ? "当前进度保留，继续后接着转码。直播录制仍会继续。" : "按下方顺序转码。暂停保留进度；停止保留未完成任务的原录像。" );
   $("#queue-pause").disabled=busy || !ready || mode!=="running";
   $("#queue-resume").disabled=busy || !ready || mode==="running" || state?.state==="stopping";
   $("#queue-stop").disabled=busy || !ready || mode==="stopped";
+  $('#queue-concurrency').disabled=busy || !ready;
+  $('#queue-concurrency').value=String(state?.max_workers || 1);
+  const waitNotes={memory:'可用内存不足，暂缓启动新任务。',storage:'可用空间不足，暂缓启动新任务。',waiting_history:'等待历史任务让出空位。'};
+  setText('#queue-concurrency-note',waitNotes[state?.parallel_wait_reason] || '两类队列最多同时处理 3 个任务；一次只转码一个文件，其余任务可核验。');
   const queued=ctx.snapshot?.queue?.queued || (ctx.jobs?.items || []).filter(job=>job.status==="queued").length;
   $("#queue-apply-sort").disabled=busy || !ready || !queued;
   $("#queue-sort").disabled=busy || !ready;
@@ -291,6 +318,7 @@ function renderJobs(data) {
     const t=node("div",job.name,"cell-title");t.title=job.name;
     title.append(t,node("div",job.path,"cell-subtitle"));
     if(job.operation==="merge")title.append(node("div","合并同场录像 · "+job.part_count+" 个分 P","cell-subtitle"));
+    if(job.merge_retained_parts)title.append(node('div','已保留原分 P，合并录像可单独检查','cell-subtitle'));
     if(job.status==="queued" && job.queue_position){
       const order=node("div",null,"queue-order-actions");order.append(node("span","第 "+job.queue_position+" 项"));
       for(const [move,label] of [["top","置顶"],["up","上移"],["down","下移"],["bottom","置底"]]){
@@ -300,21 +328,33 @@ function renderJobs(data) {
           ((move==="top" || move==="up") && job.queue_position===1) || ((move==="down" || move==="bottom") && job.queue_position===job.queued_total);
         order.append(change);
       }
+      const start=button("开始转码",()=>queueRequest("/api/jobs/"+job.id+"/start-now",
+        {revision:ctx.jobs.order_revision}));
+      start.className="secondary small";start.setAttribute("aria-label","开始转码“"+job.name+"”");
+      const unavailable=startJobUnavailable(queueActions.control);
+      start.title=unavailable || "优先处理该文件，正在处理的任务暂停并保留进度，结束后自动续跑。";
+      start.disabled=queueActions.busy || jobSelection.deleting || !!unavailable;
+      order.append(start);
       title.append(order);
     }
     tr.append(title);
-    const paused=job.status==="running" && queueActions.control?.current_job_id===job.id && queueActions.control.phase==="paused";
+    const paused=jobIsPaused(job,queueActions.control);
     const status=node("td");status.append(badge(paused ? "paused" : job.status));
-    const progress=ctx.snapshot?.progress;
+    const workerPhase=(queueActions.control?.workers || []).find(item=>item.job_id===job.id)?.phase;
+    const progress=ctx.snapshot?.progress_by_job?.[job.id] || (paused && ctx.snapshot?.suspended_progress?.job_id===job.id ? ctx.snapshot.suspended_progress : ctx.snapshot?.progress);
+    if(paused && workerPhase==='priority_wait')status.append(node('div','优先转码其他文件，进度保留','cell-subtitle'));
+    if(workerPhase==='waiting_encoder')status.append(node('div','等待当前转码结束','cell-subtitle'));
+    if(!paused && workerPhase==='verifying')status.append(node('div',verificationLabel(progress?.stage),'cell-subtitle'));
+    if(queueActions.control?.priority_job_id===job.id)status.append(node('div','优先任务','cell-subtitle'));
     if(job.status==="running") {
-      active=job;
+      if(job.id===queueActions.control?.current_job_id || !queueActions.control?.current_job_id)active=job;
       if(progress?.job_id===job.id && progress.percent!==null) {
-        const p=node("progress");p.max=100;p.value=progress.percent;p.setAttribute("aria-label","已转码 "+progress.percent+"%");status.append(p,node("div",progress.percent+"%","cell-subtitle"));
+        const p=node("progress");p.max=100;p.value=progress.percent;p.setAttribute("aria-label",(progress.kind==='verification'?"已核验 ":"已转码 ")+progress.percent+"%");status.append(p,node("div",progress.percent+"%","cell-subtitle"));
       }
     }
     tr.append(status,node("td",bytes(job.size)),node("td",bytes(job.output_size)));
     const savings=node("td",job.saved_percent===null ? "—" : (job.saved_percent>=0 ? "减少 " : "增加 ")+Math.abs(job.saved_percent)+"%",job.saved_percent===null ? "" : job.saved_percent>=0 ? "positive" : "negative");
-    tr.append(savings);
+    tr.append(savings,node('td',taskRuntime(job),'job-runtime'));
     const control=node("td",null,"align-right"), actions=node("div",null,"actions");
     if(["failed","stopped"].includes(job.status)){
       if(job.status==="failed")actions.append(button("查看原因",()=>{setText("#error-detail",job.error || "没有记录到详细错误。");$("#error-dialog").showModal();}));
@@ -339,11 +379,11 @@ function renderJobs(data) {
     $("#active-encoding").classList.toggle("is-paused",paused);
     setText("#active-phase",paused ? "已暂停 · 进度保留" : phase==="verifying" ? "正在验证视频" : phase==="publishing" ? "正在保存视频" : active.operation==="merge" ? "正在合并同场分 P" : "正在处理");
     setText("#active-name",active.name);
-    const p=ctx.snapshot?.progress, matches=p?.job_id===active.id;
+    const p=ctx.snapshot?.progress_by_job?.[active.id] || ctx.snapshot?.progress, matches=p?.job_id===active.id;
     setText("#active-percent",matches && p.percent!==null ? p.percent+"%" : "读取中");
     const bar=$("#active-progress");
     if(matches && p.percent!==null) bar.value=p.percent;else bar.removeAttribute("value");
-    setText("#active-detail",matches ? "已处理 "+Math.floor(p.processed_seconds/60)+" 分钟 / 共 "+Math.ceil(p.duration/60)+" 分钟"+(paused ? " · 已暂停" : p.speed>0 ? " · "+p.speed.toFixed(1)+"×" : "") : "正在准备视频，等待编码器上报进度。");
+    setText("#active-detail",matches && p.kind==='verification' && p.processed_seconds===null ? verificationLabel(p.stage) : matches ? "已处理 "+Math.floor(p.processed_seconds/60)+" 分钟 / 共 "+Math.ceil(p.duration/60)+" 分钟"+(paused ? " · 已暂停" : p.speed>0 ? " · "+p.speed.toFixed(1)+"×" : "") : "正在准备视频，等待编码器上报进度。");
   }
 }
 function syncJobSelection() {
@@ -375,44 +415,182 @@ async function loadJobs() {
   renderJobs(data);
   await loadLibraryQueue();
 }
-const historicalQueue={page:1,data:null,request:0,busy:false};
+const historicalQueue={page:1,data:null,request:0,busy:false,loading:false,ids:new Set()};
+const libraryDeletable=job=>['done','failed','stopped'].includes(job.status) && !job.retry_requested;
+function startJobUnavailable(control){
+  if(!control?.online || !control.supported || control.phase==='maintenance')return '转码进程尚未连接，请稍后刷新。';
+  if(control.mode!=='running')return '请先继续转码，再选择优先任务。';
+  if(control.priority_job_id)return '已有优先任务，请等待结束后再选择。';
+  return '';
+}
+function jobIsPaused(job,control){
+  const worker=(control?.workers || []).find(item=>item.job_id===job.id);
+  const peerVerifying=(control?.workers || []).some(item=>item.job_id!==job.id && ['verifying','publishing','finalizing'].includes(item.phase));
+  return job.status==='running' && ((['paused','waiting_priority','waiting_prerequisites','waiting_encoder'].includes(worker?.phase) || worker?.phase==='priority_wait' && !peerVerifying) ||
+    control?.suspended_job_id===job.id && !peerVerifying ||
+    control?.current_job_id===job.id && ['paused','priority_wait','waiting_priority','waiting_prerequisites'].includes(control.phase));
+}
+function syncLibrarySelection(){
+  const jobs=(historicalQueue.data?.items || []).filter(libraryDeletable);
+  const valid=new Set(jobs.map(job=>job.id));
+  for(const id of historicalQueue.ids)if(!valid.has(id))historicalQueue.ids.delete(id);
+  document.querySelectorAll('#library-table input[type=checkbox]').forEach(box=>{
+    box.checked=historicalQueue.ids.has(box.value);box.disabled=historicalQueue.busy || historicalQueue.loading;
+  });
+  const all=$('#library-select-all'), count=historicalQueue.ids.size;
+  all.checked=jobs.length>0 && count===jobs.length;all.indeterminate=count>0 && count<jobs.length;
+  all.disabled=historicalQueue.busy || historicalQueue.loading || !jobs.length;
+  setText('#library-selection-count','已选 '+count+' 条');
+  $('#library-delete-selected').disabled=historicalQueue.busy || historicalQueue.loading || !count;
+  $('#library-clear-selection').disabled=historicalQueue.busy || historicalQueue.loading || !count;
+  document.querySelectorAll('#library-table button[data-start-job]').forEach(start=>{
+    start.disabled=historicalQueue.busy || historicalQueue.loading || !!startJobUnavailable(historicalQueue.data?.control);
+  });
+  const data=historicalQueue.data, blocked=historicalQueue.busy || historicalQueue.loading;
+  $('#library-previous').disabled=blocked || !data || data.page<=1;
+  $('#library-next').disabled=blocked || !data || data.page*data.page_size>=data.total;
+}
+$('#library-select-all').addEventListener('change',e=>{
+  if(historicalQueue.busy)return;
+  historicalQueue.ids.clear();
+  if(e.target.checked)for(const job of historicalQueue.data?.items || [])if(libraryDeletable(job))historicalQueue.ids.add(job.id);
+  syncLibrarySelection();
+});
+$('#library-clear-selection').addEventListener('click',()=>{historicalQueue.ids.clear();syncLibrarySelection();});
+$('#library-delete-selected').addEventListener('click',async()=>{
+  if(historicalQueue.busy || historicalQueue.loading || !historicalQueue.ids.size)return;
+  const ids=[...historicalQueue.ids];
+  if(!window.confirm('删除所选的 '+ids.length+' 条后台转码记录？原录像和转码后的视频都会保留。'))return;
+  historicalQueue.busy=true;syncLibrarySelection();
+  try{
+    const result=await api('/api/library/jobs/delete-records',{method:'POST',body:JSON.stringify({ids})});
+    historicalQueue.ids.clear();historicalQueue.page=1;toast(result.message);
+  }catch(e){toast(e.message);}finally{
+    historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));
+  }
+});
+function librarySortToken(value){
+  return {'size:asc':'smallest','size:desc':'largest','name:asc':'name','name:desc':'name_desc',
+    'mtime:asc':'mtime_asc','mtime:desc':'mtime_desc'}[value] || null;
+}
+// 首次点击某一列时的默认方向：文件名从 A 开始，大小与新到旧更符合直觉。
+const librarySortDefaults={name:'asc',size:'desc',mtime:'desc'};
+function librarySortValue(){
+  const value=$('#library-sort').value;
+  return /^(name|size|mtime):(asc|desc)$/.test(value) ? value : 'default';
+}
+function syncLibrarySortHeaders(){
+  const [column,direction]=librarySortValue().split(':');
+  document.querySelectorAll('#library-sort-head th[data-sort-column]').forEach(cell=>{
+    const active=cell.dataset.sortColumn===column;
+    cell.setAttribute('aria-sort',active ? (direction==='asc' ? 'ascending' : 'descending') : 'none');
+    cell.querySelector('.sort-mark').textContent=active ? (direction==='asc' ? '▲' : '▼') : '';
+  });
+}
+async function startHistoricalJob(id,revision){
+  if(historicalQueue.busy || historicalQueue.loading)return;
+  historicalQueue.busy=true;syncLibrarySelection();
+  try{
+    const result=await api('/api/library/jobs/'+encodeURIComponent(id)+'/start-now',
+      {method:'POST',body:JSON.stringify({revision})});
+    toast(result.message);
+  }catch(e){toast(e.message);}
+  finally{historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));}
+}
+function applyLibrarySort(value){
+  const select=$('#library-sort');
+  if(select.value!==value)select.value=value;
+  syncLibrarySortHeaders();
+  historicalQueue.ids.clear();historicalQueue.page=1;
+  loadLibraryQueue().catch(e=>globalError(e.message));
+}
 async function loadLibraryQueue(){
   const request=++historicalQueue.request;
   const params=new URLSearchParams({status:$('#library-filter').value,search:$('#library-search').value,page:String(historicalQueue.page)});
-  const data=await api('/api/library/jobs?'+params);
+  const sortValue=librarySortValue();
+  if(sortValue!=='default'){const [sort,direction]=sortValue.split(':');params.set('sort',sort);params.set('direction',direction);}
+  historicalQueue.loading=true;syncLibrarySelection();syncLibrarySortHeaders();
+  $('#library-table').setAttribute('aria-busy','true');
+  let data;
+  try{
+    data=await api('/api/library/jobs?'+params);
+    if(request!==historicalQueue.request)return;
+    const lastPage=Math.max(1,Math.ceil((data.total || 0)/data.page_size));
+    if(data.total!==undefined && data.page>lastPage){
+      historicalQueue.page=lastPage;params.set('page',String(lastPage));
+      data=await api('/api/library/jobs?'+params);
+    }
+  }catch(e){
+    if(request!==historicalQueue.request)return;
+    historicalQueue.loading=false;syncLibrarySelection();$('#library-table').setAttribute('aria-busy','false');
+    throw e;
+  }
   if(request!==historicalQueue.request)return;
+  historicalQueue.loading=false;
+  $('#library-table').setAttribute('aria-busy','false');
+  if(data.page)historicalQueue.page=data.page;
   historicalQueue.data=data;$('#library-queue').hidden=!data.enabled;
+  renderStorageSavings();
   if(!data.enabled)return;
   const control=data.control || {}, ready=control.online && control.supported, mode=control.mode || 'running';
-  const labels={waiting_prerequisites:'等待先前的分 P 合并完成',waiting_priority:'等待直播队列空闲',idle:'等待后台任务',encoding:'正在后台转码',preparing:'准备后台转码',verifying:'正在验证完整性',publishing:'正在保存视频',finalizing:'正在完成收尾',paused:'后台转码已暂停',stopped:'后台转码已停止',offline:'后台进程未连接'};
+  const labels={waiting_prerequisites:'等待先前的分 P 合并完成',waiting_priority:'等待直播任务让出空位',waiting_encoder:'等待转码空位',priority_wait:'正在切换到优先任务',idle:'等待后台任务',encoding:'正在后台转码',preparing:'准备后台转码',verifying:'正在验证完整性',publishing:'正在保存视频',finalizing:'正在完成收尾',paused:'后台转码已暂停',stopped:'后台转码已停止',offline:'后台进程未连接'};
   setText('#library-state',labels[control.phase] || '正在连接后台进程');
   setText('#library-heading',data.label+' · 后台转码');
   $('#library-pause').disabled=historicalQueue.busy || !ready || mode!=='running';
   $('#library-resume').disabled=historicalQueue.busy || !ready || mode==='running' || control.state==='stopping';
   $('#library-stop').disabled=historicalQueue.busy || !ready || mode==='stopped';
+  $('#library-concurrency').disabled=historicalQueue.busy || !ready;
+  $('#library-concurrency').value=String(control.max_workers || 1);
+  const waitNotes={memory:'可用内存不足，暂缓启动新任务。',storage:'可用空间不足，暂缓启动新任务。',primary_busy:'直播任务占用空位，历史任务等待。',primary_unavailable:'等待直播队列连接。',primary_prerequisites:'等待先前的分 P 合并完成。'};
+  setText('#library-concurrency-note',waitNotes[control.parallel_wait_reason] || '一次只转码一个文件；核验期间可开始下一个，直播任务优先。');
+  $('#library-apply-sort').disabled=historicalQueue.busy || historicalQueue.loading || !ready || !data.summary.queued || sortValue==='default';
+  $('#library-apply-sort').title=sortValue==='default' ? '请先选择排序方式' : !ready ? '后台进程未连接，无法调整实际转码顺序' : !data.summary.queued ? '没有等待中的后台任务' : '按当前排序调整等待任务的实际转码顺序';
   const summary=$('#library-summary');summary.replaceChildren();
   for(const [key,label] of [['running','处理中'],['queued','排队中'],['done','已完成'],['failed','失败'],['stopped','已停止']]){
     const element=node('span',label);element.append(node('strong',data.summary[key] || 0));summary.append(element);
   }
-  setText('#library-detail','已是 H.265 的 '+data.already_hevc+' 个文件保留原文件；'+data.sidecars_retained+' 个非视频文件保留。失败原因同时写入 '+data.log+'。');
+  const saved=node('span','累计节省');saved.append(node('strong',gigabytes(data.summary.saved_bytes)));summary.append(saved);
+  setText('#library-detail','已是 H.265 的 '+data.already_hevc+' 个文件保留原文件；'+(data.retained_original || 0)+' 个任务转码后未减小，保留原片；'+data.sidecars_retained+' 个非视频文件保留。失败原因同时写入 '+data.log+'。');
   const body=$('#library-table');body.replaceChildren();
   for(const job of data.items){
     const row=node('tr'), title=node('td');row.dataset.libraryJobId=job.id;
+    const selection=node('td',null,'queue-select-cell');
+    if(libraryDeletable(job)){
+      const box=node('input',null,'queue-checkbox');box.type='checkbox';box.value=job.id;
+      box.setAttribute('aria-label','选择后台记录 '+job.name);
+      box.addEventListener('change',()=>{if(box.checked)historicalQueue.ids.add(job.id);else historicalQueue.ids.delete(job.id);syncLibrarySelection();});
+      selection.append(box);
+    }
     title.append(node('div',job.name,'cell-title'),node('div',job.path,'cell-subtitle'));
     const status=node('td');
-    const suspended=job.status==='running' && ['waiting_priority','waiting_prerequisites','paused'].includes(control.phase);
-    status.append(badge(suspended?'paused':job.status));
-    if(suspended)status.append(node('div',control.phase!=='paused'?'优先处理直播任务，进度保留':'进度保留','cell-subtitle'));
+    const suspended=jobIsPaused(job,control);
+    status.append(job.retained_original?node('span','原片保留','status paused'):badge(suspended?'paused':job.status));
+    const workerPhase=(control.workers || []).find(item=>item.job_id===job.id)?.phase;
+    const taskProgress=data.progress_by_job?.[job.id] || (data.suspended_progress?.job_id===job.id ? data.suspended_progress : data.progress);
+    if(suspended)status.append(node('div',workerPhase==='waiting_encoder'?'等待当前转码结束':workerPhase==='priority_wait'?'优先转码其他文件，进度保留':workerPhase==='paused'?'进度保留':'优先处理直播任务，进度保留','cell-subtitle'));
+    if(!suspended && workerPhase==='verifying')status.append(node('div',verificationLabel(taskProgress?.stage),'cell-subtitle'));
+    if(control.priority_job_id===job.id)status.append(node('div','优先任务','cell-subtitle'));
     if(job.already_hevc)status.append(node('div','原文件已是 H.265','cell-subtitle'));
+    if(job.retained_original)status.append(node('div','转码后未减小','cell-subtitle'));
     if(job.retry_requested)status.append(node('div','等待检查并重新排队','cell-subtitle'));
-    if(job.status==='running' && data.progress?.job_id===job.id && data.progress.percent!==null){
-      const progress=node('progress');progress.max=100;progress.value=data.progress.percent;
-      progress.setAttribute('aria-label','历史录像已转码 '+data.progress.percent+'%');
-      status.append(progress,node('div',data.progress.percent+'%','cell-subtitle'));
+    if(job.status==='running' && taskProgress?.job_id===job.id && taskProgress.percent!==null){
+      const progress=node('progress');progress.max=100;progress.value=taskProgress.percent;
+      progress.setAttribute('aria-label',(taskProgress.kind==='verification'?'历史录像已核验 ':'历史录像已转码 ')+taskProgress.percent+'%');
+      status.append(progress,node('div',taskProgress.percent+'%','cell-subtitle'));
     }
     const actions=node('div',null,'actions'), cell=node('td',null,'align-right');
+    if(job.status==='queued'){
+      const revision=control.order_revision;
+      const start=button('开始转码',()=>startHistoricalJob(job.id,revision));
+      start.dataset.revision=revision;
+      start.dataset.startJob=job.id;start.setAttribute('aria-label','开始转码“'+job.name+'”');
+      const unavailable=startJobUnavailable(control);
+      start.disabled=historicalQueue.busy || historicalQueue.loading || !!unavailable;
+      start.title=unavailable || '优先处理该历史录像，正在处理的任务暂停并保留进度，结束后自动续跑；直播任务仍优先。';
+      actions.append(start);
+    }
     if(job.status==='failed')actions.append(button('查看原因',()=>{setText('#error-detail',job.error || '没有记录到详细错误。');$('#error-dialog').showModal();}));
-    if(['failed','stopped'].includes(job.status)){
+    if(['failed','stopped'].includes(job.status) || job.retained_original){
       const retry=button('重试',()=>action(retry,async()=>{const result=await api('/api/library/jobs/'+job.id+'/retry',{method:'POST',body:'{}'});toast(result.message);await loadLibraryQueue();}));
       retry.disabled=historicalQueue.busy || job.retry_requested;actions.append(retry);
     }
@@ -422,26 +600,58 @@ async function loadLibraryQueue(){
         const result=await api('/api/library/jobs/'+job.id,{method:'DELETE'});toast(result.message);await loadLibraryQueue();
       }));remove.disabled=historicalQueue.busy || job.retry_requested;actions.append(remove);
     }
-    cell.append(actions);row.append(title,status,node('td',bytes(job.size)),node('td',bytes(job.output_size)),cell);body.append(row);
+    const output=node('td',job.retained_original?'未采用':bytes(job.output_size));
+    if(job.retained_original && job.candidate_size)output.append(node('div','转码结果 '+bytes(job.candidate_size),'cell-subtitle'));
+    const modified=job.modified!==null && job.modified!==undefined ? new Date(job.modified*1000).toLocaleString('zh-CN') : '—';
+    cell.append(actions);row.append(selection,title,status,node('td',bytes(job.size)),node('td',modified,'job-modified'),output,node('td',taskRuntime(job),'job-runtime'),cell);body.append(row);
   }
-  if(!data.items.length){const row=node('tr'),cell=node('td','当前筛选下没有后台任务。','muted');cell.colSpan=5;row.append(cell);body.append(row);}
+  if(!data.items.length){const row=node('tr'),cell=node('td','当前筛选下没有后台任务。','muted');cell.colSpan=8;row.append(cell);body.append(row);}
+  syncLibrarySelection();
   setText('#library-page-label',data.total+' 个任务 · 第 '+data.page+' 页 / 共 '+Math.max(1,Math.ceil(data.total/data.page_size))+' 页');
-  $('#library-previous').disabled=data.page<=1;$('#library-next').disabled=data.page*data.page_size>=data.total;
 }
 for(const actionName of ['pause','resume','stop'])$('#library-'+actionName).addEventListener('click',async()=>{
   if(historicalQueue.busy || !historicalQueue.data?.control)return;
-  if(actionName==='stop' && !window.confirm('停止当前后台转码并暂停后台队列？源文件保留；已停止任务重试时从头转码。直播队列继续工作。'))return;
+  if(actionName==='stop' && !window.confirm('停止所有正在处理的后台任务并暂停后台队列？源文件保留；已停止任务重试时从头转码。直播队列继续工作。'))return;
   historicalQueue.busy=true;
   try{
     const control=historicalQueue.data.control;
     const result=await api('/api/library/control',{method:'POST',body:JSON.stringify({action:actionName,revision:control.control_revision,current_job_id:control.current_job_id})});toast(result.message);
   }catch(e){toast(e.message);}finally{historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));}
 });
-$('#library-filter').addEventListener('change',()=>{historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-concurrency').addEventListener('change',async event=>{
+  const control=historicalQueue.data?.control;
+  if(historicalQueue.busy || !control)return;
+  historicalQueue.busy=true;
+  try{
+    const result=await api('/api/library/concurrency',{method:'POST',body:JSON.stringify({max_workers:Number(event.target.value),revision:control.control_revision})});toast(result.message);
+  }catch(e){toast(e.message);}
+  finally{historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));}
+});
+$('#library-filter').addEventListener('change',()=>{historicalQueue.ids.clear();historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-sort').addEventListener('change',()=>{syncLibrarySortHeaders();historicalQueue.ids.clear();historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-sort-head').addEventListener('click',event=>{
+  const trigger=event.target.closest('button[data-sort]');
+  if(!trigger || historicalQueue.loading)return;
+  const column=trigger.dataset.sort, [active,direction]=librarySortValue().split(':');
+  // 同列再次点击切换升/降序；换列时先用在直觉上的默认方向。
+  applyLibrarySort(active===column ? column+':'+(direction==='asc' ? 'desc' : 'asc') : column+':'+librarySortDefaults[column]);
+});
+syncLibrarySortHeaders();
+$('#library-apply-sort').addEventListener('click',async()=>{
+  if(historicalQueue.busy || historicalQueue.loading)return;
+  const control=historicalQueue.data?.control, sort=librarySortToken($('#library-sort').value);
+  if(!control || !sort)return;
+  historicalQueue.busy=true;syncLibrarySelection();$('#library-apply-sort').disabled=true;
+  try{
+    const result=await api('/api/library/order',{method:'POST',body:JSON.stringify({revision:control.order_revision,sort})});
+    toast(result.message);
+  }catch(e){toast(e.message);}
+  finally{historicalQueue.busy=false;await loadLibraryQueue().catch(e=>globalError(e.message));}
+});
 let librarySearchTimer;
-$('#library-search').addEventListener('input',()=>{historicalQueue.request++;clearTimeout(librarySearchTimer);librarySearchTimer=setTimeout(()=>{historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));},350);});
-$('#library-previous').addEventListener('click',()=>{historicalQueue.page--;loadLibraryQueue().catch(e=>globalError(e.message));});
-$('#library-next').addEventListener('click',()=>{historicalQueue.page++;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-search').addEventListener('input',()=>{historicalQueue.request++;clearTimeout(librarySearchTimer);librarySearchTimer=setTimeout(()=>{historicalQueue.ids.clear();historicalQueue.page=1;loadLibraryQueue().catch(e=>globalError(e.message));},350);});
+$('#library-previous').addEventListener('click',()=>{if(historicalQueue.busy || historicalQueue.loading || historicalQueue.page<=1)return;historicalQueue.ids.clear();historicalQueue.page--;loadLibraryQueue().catch(e=>globalError(e.message));});
+$('#library-next').addEventListener('click',()=>{if(historicalQueue.busy || historicalQueue.loading)return;historicalQueue.ids.clear();historicalQueue.page++;loadLibraryQueue().catch(e=>globalError(e.message));});
 async function refresh() {
   if(!ctx.csrf || ctx.busy) return;
   ctx.busy=true;
@@ -509,10 +719,14 @@ $("#logout").addEventListener("click",()=>action($("#logout"),async()=>{await ap
 for(const [selector,command] of [["#queue-pause","pause"],["#queue-resume","resume"],["#queue-stop","stop"]]){
   $(selector).addEventListener("click",()=>{
     const state=queueActions.control;if(!state || queueActions.busy)return;
-    if(command==="stop" && !window.confirm("停止当前转码并暂停后续队列？未完成任务的原录像会保留，当前转码进度会丢弃。已停止的任务重新排队后将从头转码。"))return;
+    if(command==="stop" && !window.confirm("停止所有正在处理的任务并暂停后续队列？未完成任务的原录像会保留，当前转码进度会丢弃。已停止的任务重新排队后将从头转码。"))return;
     queueRequest("/api/queue/control",{action:command,revision:state.control_revision,current_job_id:state.current_job_id});
   });
 }
+$('#queue-concurrency').addEventListener('change',event=>{
+  const state=queueActions.control;
+  if(state)queueRequest('/api/queue/concurrency',{max_workers:Number(event.target.value),revision:state.control_revision});
+});
 $("#queue-apply-sort").addEventListener("click",()=>{
   if(ctx.jobs)queueRequest("/api/queue/order",{revision:ctx.jobs.order_revision,sort:$("#queue-sort").value});
 });

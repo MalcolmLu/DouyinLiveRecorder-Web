@@ -194,19 +194,46 @@ def create_app(paths=None, testing=False, desktop=None):
     def library_jobs():
         status = request.args.get('status', 'all')
         search = request.args.get('search', '').strip()
+        sort = request.args.get('sort', '').strip()
+        direction = request.args.get('direction', 'asc' if sort == 'name' else 'desc').strip().lower()
         try:
             page = int(request.args.get('page', '1'))
         except ValueError:
             raise AppError('页码不正确。')
         if status not in ('all', 'queued', 'running', 'published', 'done', 'failed', 'stopped') or len(search) > 100 or not 1 <= page <= 10000:
             raise AppError('筛选条件不正确。')
-        return jsonify(library_queue.snapshot(status, search, page))
+        if sort and (sort not in ('size', 'name', 'mtime') or direction not in ('asc', 'desc')):
+            raise AppError('排序条件不正确。')
+        return jsonify(library_queue.snapshot(status, search, page, sort or None, direction if sort else None))
+
+    @app.post('/api/library/order')
+    def library_order():
+        data = body()
+        state = library_queue.reorder(data.get('revision'), sort=data.get('sort'))
+        return jsonify(ok=True, control=state, message='历史后台转码顺序已更新，正在处理的任务不换位。')
+
+    @app.post('/api/library/jobs/<identifier>/start-now')
+    def library_start_now(identifier):
+        state = library_queue.start_now(identifier, body().get('revision'))
+        return jsonify(ok=True, control=state,
+                       message='已请求优先开始；正在处理的任务会在安全点保留进度，随后处理该文件。')
+
+    @app.post('/api/library/jobs/delete-records')
+    def library_delete_records():
+        count = library_queue.delete_records(body().get('ids'))
+        return jsonify(ok=True, deleted=count, message=f'已删除 {count} 条后台转码记录，视频文件已保留。')
 
     @app.post('/api/library/control')
     def library_control():
         data = body()
         state = library_queue.change_control(data.get('action'), data.get('revision'), data.get('current_job_id'))
         return jsonify(ok=True, control=state, message='后台转码控制指令已提交。直播队列仍拥有最高优先级。')
+
+    @app.post('/api/library/concurrency')
+    def library_concurrency():
+        data = body()
+        state = library_queue.set_max_workers(data.get('max_workers'), data.get('revision'))
+        return jsonify(ok=True, control=state, message='后台并行任务数已更新；正在处理的任务会继续完成。')
 
     @app.post('/api/library/jobs/<identifier>/retry')
     def library_retry(identifier):
@@ -224,6 +251,12 @@ def create_app(paths=None, testing=False, desktop=None):
         state = queue.change_control(data.get("action"), data.get("revision"), data.get("current_job_id"))
         return jsonify(ok=True, control=state, message="转码控制指令已提交。")
 
+    @app.post('/api/queue/concurrency')
+    def queue_concurrency():
+        data = body()
+        state = queue.set_max_workers(data.get('max_workers'), data.get('revision'))
+        return jsonify(ok=True, control=state, message='并行任务数已更新；正在处理的任务会继续完成。')
+
     @app.post("/api/queue/order")
     def order_queue():
         data = body()
@@ -236,6 +269,12 @@ def create_app(paths=None, testing=False, desktop=None):
                 raise AppError("请选择等待转码的任务。")
             state = queue.reorder(data.get("revision"), identifier=data["job_id"], direction=data.get("move"))
         return jsonify(ok=True, control=state, message="等待任务的实际转码顺序已更新。")
+
+    @app.post("/api/jobs/<identifier>/start-now")
+    def start_now(identifier):
+        state = queue.start_now(identifier, body().get("revision"))
+        return jsonify(ok=True, control=state,
+                       message="已请求优先开始；正在处理的任务会在安全点保留进度，随后处理该文件。")
 
     @app.post("/api/jobs/<identifier>/retry")
     def retry(identifier):
