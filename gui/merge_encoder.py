@@ -105,7 +105,8 @@ def encode(processor, job, record):
         raise ValueError("Part codec initialization differs; parts retained")
     duration = sum(info[0] for info in infos)
     temporary = destination.with_name("." + destination.stem + ".merge-" + job["id"][:12] + ".tmp" + destination.suffix)
-    listing = processor.HOME / (".merge-" + job["id"] + ".ffconcat")
+    state = processor.state_home() if hasattr(processor, 'state_home') else processor.HOME
+    listing = state / (".merge-" + job["id"] + ".ffconcat")
     if temporary.exists():
         temporary.unlink()  # Only this job's unpublished temporary output.
     lines = ["ffconcat version 1.0"]
@@ -115,9 +116,9 @@ def encode(processor, job, record):
             raise ValueError("Part filename cannot be represented safely")
         lines += ["file '" + path.replace("'", "'\\''") + "'", "option analyzeduration 60000000", "option probesize 100000000", "duration %.9f" % info[0]]
     listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (processor.HOME / "current-job.json").write_text(json.dumps({"job_id": job["id"], "duration": duration,
+    (state / "current-job.json").write_text(json.dumps({"job_id": job["id"], "duration": duration,
                 "started_at": time.time(), "encoder": "copy", "operation": "merge"}))
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-n", "-progress", str(processor.HOME / "progress.txt"),
+    command = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-n", "-progress", str(state / "progress.txt"),
                "-stats_period", "2", "-f", "concat", "-safe", "0", "-auto_convert", "0", "-i", str(listing),
                "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-avoid_negative_ts", "make_zero"]
     if destination.suffix.lower() == ".mp4":
@@ -127,7 +128,7 @@ def encode(processor, job, record):
     command.append(str(temporary))
     try:
         processor.checkpoint("encoding")
-        with (processor.HOME / "merge-last.log").open("wb") as errors:
+        with (state / "merge-last.log").open("wb") as errors:
             processor.run_process(command, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors)
         processor.checkpoint("verifying")
         output = media_info(processor, temporary)
@@ -160,7 +161,7 @@ def encode(processor, job, record):
             record = dict(db.execute("SELECT * FROM merge_jobs WHERE id=?", (job["id"],)).fetchone())
         finish(processor, published, record)
     except subprocess.CalledProcessError as error:
-        log = processor.HOME / "merge-last.log"
+        log = state / "merge-last.log"
         detail = log.read_text(errors="replace")[-2000:] if log.exists() else ""
         raise RuntimeError(f"FFmpeg merge failed ({error.returncode}): {detail}; parts retained") from error
     finally:

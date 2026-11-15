@@ -54,6 +54,25 @@ class QueueControlApiTests(unittest.TestCase):
         with closing(sqlite3.connect(self.paths.queue)) as db:
             self.assertEqual(db.execute("SELECT status FROM jobs WHERE id=?", (self.ids[3],)).fetchone()[0], "running")
 
+    def test_start_now_promotes_a_queued_job_and_rejects_active_or_stale_requests(self):
+        before = self.parts["queue"].control()
+        route = "/api/jobs/" + self.ids[2] + "/start-now"
+        self.assertEqual(self.client.post(route, json={"revision": before["order_revision"]}).status_code, 403)
+        stale = self.client.post(route, headers=self.headers,
+                                 json={"revision": before["order_revision"] - 1})
+        self.assertEqual(stale.status_code, 409)
+        result = self.client.post(route, headers=self.headers,
+                                  json={"revision": before["order_revision"]})
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(self.queue()["items"][0]["id"], self.ids[2])
+        self.assertEqual(result.json["control"]["priority_job_id"], self.ids[2])
+        self.assertEqual(self.client.post("/api/jobs/" + self.ids[3] + "/start-now",
+                                          headers=self.headers,
+                                          json={"revision": result.json["control"]["order_revision"]}).status_code, 409)
+        self.assertEqual(self.client.post("/api/jobs/" + "0" * 64 + "/start-now",
+                                          headers=self.headers,
+                                          json={"revision": result.json["control"]["order_revision"]}).status_code, 404)
+
     def test_sort_applies_to_all_waiting_jobs_and_new_records_append(self):
         with closing(sqlite3.connect(self.paths.queue)) as db, db:
             for identifier, size in zip(self.ids[:3], [30, 10, 20]):
@@ -94,6 +113,23 @@ class QueueControlApiTests(unittest.TestCase):
         self.assertEqual(self.command("stop").status_code, 200)
         self.assertEqual(self.command("resume").status_code, 409)  # Do not revoke an in-flight stop.
         self.assertEqual(self.parts["queue"].control()["mode"], "stopped")
+
+    def test_concurrency_requires_auth_and_revision_and_limits_values(self):
+        route = '/api/queue/concurrency'
+        state = self.parts['queue'].control()
+        payload = {'max_workers': 2, 'revision': state['control_revision']}
+        self.assertEqual(self.app.test_client().post(route, json=payload).status_code, 401)
+        self.assertEqual(self.client.post(route, json=payload).status_code, 403)
+        result = self.client.post(route, headers=self.headers, json=payload)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['control']['max_workers'], 2)
+        self.assertEqual(self.client.post(route, headers=self.headers, json=payload).status_code, 409)
+        revision = result.json['control']['control_revision']
+        result = self.client.post(route, headers=self.headers, json={'max_workers': 3, 'revision': revision})
+        self.assertEqual(result.json['control']['max_workers'], 3)
+        revision = result.json['control']['control_revision']
+        self.assertEqual(self.client.post(route, headers=self.headers, json={'max_workers': 4, 'revision': revision}).status_code, 422)
+        self.assertEqual(self.client.post(route, headers=self.headers, json={'max_workers': True, 'revision': revision}).status_code, 422)
 
     def test_stopped_task_can_requeue_at_end_or_delete_record_without_deleting_video(self):
         identifier = self.ids[-1]

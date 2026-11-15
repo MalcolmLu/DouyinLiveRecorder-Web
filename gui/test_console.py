@@ -453,6 +453,33 @@ class ConsoleTests(unittest.TestCase):
         self.assertFalse(bridge.active)
         self.assertEqual(bridge.resolve_proxy("https://custom.example/test.m3u8", "fallback"), "fallback")
 
+    def test_storage_savings_survive_record_deletion_and_exclude_retained_originals(self):
+        ids = [digit * 64 for digit in 'bcd']
+        for identifier in ids:
+            self.add_queue_job(identifier, 'done')
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
+            for identifier, size, output, deletes in zip(ids, (3_000_000_000, 5000, 1000),
+                                                         (1_500_000_000, 1000, 1100), (1, 0, 1)):
+                db.execute('UPDATE jobs SET size=?,output_size=?,delete_source=? WHERE id=?',
+                           (size, output, deletes, identifier))
+        total = 1_499_999_900
+        self.assertEqual(self.client.get('/api/dashboard').json['queue']['saved_bytes'], total)
+        self.assertEqual(self.client.delete('/api/jobs/' + ids[0], headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.get('/api/dashboard').json['queue']['saved_bytes'], total)
+
+    def test_task_runtime_is_optional_for_old_records_and_exposed_by_the_api(self):
+        import queue_control
+        from unittest.mock import patch
+        self.assertIsNone(self.client.get('/api/jobs?status=all').json['items'][0]['runtime_seconds'])
+        with closing(sqlite3.connect(self.paths.queue)) as db, db:
+            db.execute("UPDATE jobs SET status='running' WHERE id=?", (self.job_id,))
+            queue_control.migrate(db)
+            with patch('job_metrics.time.monotonic', return_value=10):
+                queue_control.runtime(db, 'metric-test-worker', 'encoding', self.job_id)
+            with patch('job_metrics.time.monotonic', return_value=75.5):
+                queue_control.runtime(db, 'metric-test-worker', 'paused', self.job_id)
+        self.assertEqual(self.client.get('/api/jobs?status=all').json['items'][0]['runtime_seconds'], 65.5)
+
     def test_no_unprotected_static_or_traversal_access_to_secrets(self):
         self.assertEqual(self.client.get("/static/../../state/web.sqlite3").status_code, 404)
         self.assertEqual(self.client.get("/static/../auth.py").status_code, 404)

@@ -41,7 +41,7 @@
         <button class="nav-item" id="desktop-nav" data-page="desktop" hidden><span class="nav-number">05</span>桌面设置</button>
       </nav>
       <div class="sidebar-bottom">
-        <div class="engine-note"><span class="dot"></span><div><span id="engine-title">H.265 硬件转码</span><small id="engine-description">Intel QSV · 单任务队列</small></div></div>
+        <div class="engine-note"><span class="dot"></span><div><span id="engine-title">H.265 硬件转码</span><small id="engine-description">Intel QSV · 转码与核验可交叠</small></div></div>
         <button id="logout" class="text-button">退出登录</button>
         <span class="version" id="app-version">DouyinLiveRecorder-Web 1.1.2 · Core v4.0.7</span>
       </div>
@@ -74,6 +74,10 @@
 
         <section id="page-jobs" class="page" hidden>
           <div class="page-heading"><div><span class="eyebrow">ENCODING WORKSPACE</span><h1>转码队列</h1><p class="muted">从录制文件到最终视频，每一步都看得见。</p></div><button id="refresh-jobs" class="secondary">刷新队列</button></div>
+          <div class="storage-savings" aria-label="累计节省存储">
+            <div><span class="eyebrow">累计节省存储</span><strong id="queue-total-saved">—</strong></div>
+            <div><p id="queue-saved-detail" class="muted">正在统计</p><small class="muted">统计已完成且已替换原文件的任务，删除记录不影响累计值。1 GB = 1,000 MB。</small></div>
+          </div>
           <div class="queue-controls">
             <div class="queue-control-status"><strong id="queue-control-state" role="status" aria-live="polite">读取转码状态中</strong><p id="queue-control-detail" class="muted">暂停保留进度；停止保留未完成任务的原录像。</p></div>
             <div class="queue-control-buttons"><button id="queue-pause" class="secondary small" type="button" disabled>暂停转码</button><button id="queue-resume" class="primary small" type="button" disabled>继续转码</button><button id="queue-stop" class="secondary small danger-button" type="button" disabled>停止转码</button></div>
@@ -83,6 +87,7 @@
             <div class="progress-area"><div class="progress-label"><span id="active-encoder-label">H.265 · Intel QSV</span><strong id="active-percent">—</strong></div><progress id="active-progress" max="100"></progress></div>
           </div>
           <div class="queue-summary" id="queue-summary"></div>
+          <div class="queue-sort"><label for="queue-concurrency">直播队列处理任务数</label><select id="queue-concurrency" disabled><option value="1">1 个任务</option><option value="2">2 个任务</option><option value="3">3 个任务</option></select><small id="queue-concurrency-note" class="muted">两类队列最多同时处理 3 个任务；一次只转码一个文件，其余任务可核验。</small></div>
           <div class="queue-sort">
             <label for="queue-sort">等待任务排序</label><select id="queue-sort"><option value="oldest">入队时间：从早到晚</option><option value="newest">入队时间：从晚到早</option><option value="smallest">文件大小：从小到大</option><option value="largest">文件大小：从大到小</option><option value="name">文件名：A → Z</option></select><button id="queue-apply-sort" class="secondary small" type="button" disabled>应用顺序</button><small class="muted">作用于全部等待任务；也可逐项置顶、上移或下移。</small>
           </div>
@@ -101,17 +106,26 @@
           </div>
           <div id="jobs-empty" class="empty-state" hidden><h3>这里还没有任务</h3><p>录制完成的视频会自动进入队列，也可以调整上方的筛选条件。</p></div>
           <div class="table-wrap" id="job-table-wrap">
-            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成、失败或已停止的记录"></th><th>录像文件 / 转码顺序</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
+            <table><thead><tr><th class="queue-select-cell"><input id="select-all-jobs" class="queue-checkbox" type="checkbox" aria-label="全选本页可删除记录" title="全选本页已完成、失败或已停止的记录"></th><th>录像文件 / 转码顺序</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th>空间变化</th><th>实际用时</th><th class="align-right">操作</th></tr></thead><tbody id="job-table"></tbody></table>
           </div>
           <div class="pagination"><span id="page-label" class="muted"></span><div><button id="previous-page" class="secondary small">上一页</button><button id="next-page" class="secondary small">下一页</button></div></div>
-          <p class="muted footnote">排序会改变实际转码顺序，正在处理的任务不换位。暂停后可继续当前进度；停止会中止当前任务并暂停队列，已停止的任务可重新排队，从头转码。删除记录会保留录像文件。</p>
+          <p class="muted footnote">排序会改变实际转码顺序，正在处理的任务不换位。暂停后可继续当前进度；停止会中止正在处理的任务并暂停队列，已停止的任务可重新排队，从头转码。删除记录会保留录像文件。</p>
+          <p class="muted footnote">实际用时包含本次转码和校验，不含排队、暂停及直播优先等待；旧任务没有准确计时数据时显示“未记录”。</p>
           <section id="library-queue" class="library-queue" hidden aria-labelledby="library-heading">
             <div class="dialog-heading"><div><span class="eyebrow">BACKGROUND ENCODING</span><h2 id="library-heading">历史录像后台转码</h2></div><span class="pill" id="library-state" role="status" aria-live="polite">读取中</span></div>
-            <p class="muted">直播转码和分 P 合并优先；有直播任务时，后台转码自动暂停并保留进度，空闲后继续。验证 H.265、音轨、完整性成功后删除源文件；失败保留源文件并记录原因。</p>
+            <p class="muted">以节省空间为目标：只有输出更小且通过 H.265、音轨和完整性核验，才替换原片。直播与历史共用三个处理名额，一次只转码一个文件；核验期间可开始下一个，直播任务优先。</p>
             <div class="queue-summary" id="library-summary"></div>
+            <div class="queue-sort"><label for="library-concurrency">历史队列处理任务数</label><select id="library-concurrency" disabled><option value="1">1 个任务</option><option value="2">2 个任务</option><option value="3">3 个任务</option></select><small id="library-concurrency-note" class="muted">一次只转码一个文件；核验期间可开始下一个，直播任务优先。</small></div>
+            <div class="queue-sort">
+              <label for="library-sort">历史任务排序</label>
+              <select id="library-sort"><option value="default">默认：状态与队列顺序</option><option value="size:desc">文件大小：从大到小</option><option value="size:asc">文件大小：从小到大</option><option value="name:asc">文件名：A → Z</option><option value="name:desc">文件名：Z → A</option><option value="mtime:desc">源文件修改时间：从新到旧</option><option value="mtime:asc">源文件修改时间：从旧到新</option></select>
+              <button id="library-apply-sort" class="secondary small" type="button" disabled>应用为转码顺序</button>
+              <small class="muted">排序改变列表显示，也可点击表头切换升序/降序；应用后，后台按此顺序处理等待任务。</small>
+            </div>
             <div class="toolbar"><label class="sr-only" for="library-filter">后台任务状态</label><select id="library-filter"><option value="all">全部后台任务</option><option value="queued">排队中</option><option value="running">处理中</option><option value="failed">失败</option><option value="stopped">已停止</option><option value="done">已完成</option></select><label class="sr-only" for="library-search">搜索历史录像</label><input id="library-search" type="search" maxlength="100" placeholder="搜索历史录像"><div class="actions"><button id="library-pause" class="secondary small" disabled>暂停后台转码</button><button id="library-resume" class="secondary small" disabled>继续后台转码</button><button id="library-stop" class="secondary small danger-button" disabled>停止后台转码</button></div></div>
+            <div class="queue-bulk"><label class="check-row"><input id="library-select-all" class="queue-checkbox" type="checkbox"> 选择本页可删除记录</label><span id="library-selection-count" class="muted" role="status" aria-live="polite">已选 0 条</span><button id="library-delete-selected" class="secondary small" disabled>删除所选记录</button><button id="library-clear-selection" class="secondary small" disabled>取消选择</button></div>
             <p id="library-detail" class="muted" role="status"></p>
-            <div class="table-wrap"><table><thead><tr><th>历史录像</th><th>状态 / 进度</th><th>原始大小</th><th>输出大小</th><th class="align-right">操作</th></tr></thead><tbody id="library-table"></tbody></table></div>
+            <div class="table-wrap"><table><thead id="library-sort-head"><tr><th class="queue-select-cell"><span class="sr-only">选择记录</span></th><th scope="col" aria-sort="none" data-sort-column="name"><button class="sort-header" type="button" data-sort="name" title="按文件名排序">历史录像<span class="sort-mark" aria-hidden="true"></span></button></th><th scope="col">状态 / 进度</th><th scope="col" aria-sort="none" data-sort-column="size"><button class="sort-header" type="button" data-sort="size" title="按原始文件大小排序">原始大小<span class="sort-mark" aria-hidden="true"></span></button></th><th scope="col" aria-sort="none" data-sort-column="mtime"><button class="sort-header" type="button" data-sort="mtime" title="按源文件修改时间排序">修改时间<span class="sort-mark" aria-hidden="true"></span></button></th><th scope="col">输出大小</th><th scope="col">实际用时</th><th class="align-right">操作</th></tr></thead><tbody id="library-table"></tbody></table></div>
             <div class="pagination"><span id="library-page-label" class="muted"></span><div><button id="library-previous" class="secondary small">上一页</button><button id="library-next" class="secondary small">下一页</button></div></div>
           </section>
         </section>
